@@ -19,7 +19,7 @@
  *
  *  Build:  gcc -std=c99 -Wall -Wextra -pedantic -o uas.exe \
  *              main.c lexer.c parser.c codegen.c backend_8051.c \
- *              backend_x86_64.c
+ *              backend_x86_64.c emitter_pe.c
  *
  *  License: MIT
  * =============================================================================
@@ -34,6 +34,7 @@
 #include "codegen.h"
 #include "backend_8051.h"
 #include "backend_x86_64.h"
+#include "emitter_pe.h"
 
 /* =========================================================================
  *  Platform-specific JIT headers
@@ -429,8 +430,20 @@ int main(int argc, char *argv[])
                 if (execute_jit(code) != 0) {
                     rc = EXIT_FAILURE;
                 }
-            } else {
-                /* Write binary */
+            }
+            else if (cfg.sys != NULL &&
+                     str_casecmp_portable(cfg.sys, "win32") == 0) {
+                /* Emit PE executable */
+                const char *pe_out = cfg.output_file;
+                if (strcmp(pe_out, "a.out") == 0) {
+                    pe_out = "a.exe";
+                }
+                if (emit_pe_exe(pe_out, code) != 0) {
+                    rc = EXIT_FAILURE;
+                }
+            }
+            else {
+                /* Write raw binary */
                 if (write_binary(cfg.output_file, code->bytes, code->size) != 0) {
                     rc = EXIT_FAILURE;
                 } else {
