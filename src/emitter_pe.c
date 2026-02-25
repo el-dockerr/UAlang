@@ -1,6 +1,6 @@
 /*
  * =============================================================================
- *  UAS - Unified Assembler System
+ *  UA - Unified Assembler
  *  Phase 6: Windows PE (Portable Executable) Emitter
  *
  *  File:    emitter_pe.c

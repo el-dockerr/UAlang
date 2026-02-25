@@ -1,12 +1,12 @@
 /*
  * =============================================================================
- *  UAS - Unified Assembler System
+ *  UA - Unified Assembler
  *  Phase 5: x86-64 Back-End (Code Generation)
  *
  *  File:    backend_x86_64.h
  *  Purpose: Public interface for the x86-64 code generator.
  *
- *  Register Mapping (UAS virtual  ->  x86-64):
+ *  Register Mapping (UA virtual  ->  x86-64):
  *      R0  ->  RAX  (encoding 0)
  *      R1  ->  RCX  (encoding 1)
  *      R2  ->  RDX  (encoding 2)
@@ -22,8 +22,8 @@
  * =============================================================================
  */
 
-#ifndef UAS_BACKEND_X86_64_H
-#define UAS_BACKEND_X86_64_H
+#ifndef UA_BACKEND_X86_64_H
+#define UA_BACKEND_X86_64_H
 
 #include "parser.h"
 #include "codegen.h"    /* CodeBuffer, free_code_buffer, hexdump */
@@ -34,7 +34,7 @@
 
 /*
  * generate_x86_64()
- *   Translates the architecture-neutral UAS IR into raw x86-64 machine code.
+ *   Translates the architecture-neutral UA IR into raw x86-64 machine code.
  *   Returns a CodeBuffer that the caller must free with free_code_buffer().
  *
  *   Only R0-R3 are supported in Phase 5.  Unsupported opcodes cause a
@@ -42,4 +42,4 @@
  */
 CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count);
 
-#endif /* UAS_BACKEND_X86_64_H */
+#endif /* UA_BACKEND_X86_64_H */

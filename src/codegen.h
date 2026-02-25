@@ -1,6 +1,6 @@
 /*
  * =============================================================================
- *  UAS - Unified Assembler System
+ *  UA - Unified Assembler
  *  Shared Code-Generation Utilities
  *
  *  File:    codegen.h
@@ -12,8 +12,8 @@
  * =============================================================================
  */
 
-#ifndef UAS_CODEGEN_H
-#define UAS_CODEGEN_H
+#ifndef UA_CODEGEN_H
+#define UA_CODEGEN_H
 
 #include <stdint.h>
 
@@ -58,4 +58,4 @@ void emit_byte(CodeBuffer *buf, uint8_t byte);
  */
 void hexdump(const uint8_t *data, int size);
 
-#endif /* UAS_CODEGEN_H */
+#endif /* UA_CODEGEN_H */

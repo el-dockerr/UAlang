@@ -1,10 +1,10 @@
 /*
  * =============================================================================
- *  UAS - Unified Assembler System
+ *  UA - Unified Assembler
  *  Phase 1: Lexer / Tokenizer
  *
  *  File:    lexer.c
- *  Purpose: Implementation of the UAS lexical analyzer.
+ *  Purpose: Implementation of the UA lexical analyzer.
  *
  *  The lexer performs a single left-to-right scan of the source text and
  *  produces a flat array of Token structs.  It recognises:
@@ -68,6 +68,9 @@ static const char *OPCODES[] = {
     "SHR",
     "MUL",
     "DIV",
+    "INC",
+    "DEC",
+    "INT",
     NULL                        /* sentinel */
 };
 
@@ -159,7 +162,7 @@ static Token* ensure_capacity(Token *tokens, int count, int *capacity)
     int new_cap = (*capacity) * 2;
     Token *tmp = (Token *)realloc(tokens, sizeof(Token) * (size_t)new_cap);
     if (!tmp) {
-        fprintf(stderr, "UAS Lexer: out of memory (realloc failed)\n");
+        fprintf(stderr, "UA Lexer: out of memory (realloc failed)\n");
         free(tokens);
         return NULL;
     }
@@ -170,7 +173,7 @@ static Token* ensure_capacity(Token *tokens, int count, int *capacity)
 /* =========================================================================
  *  Helper: create and append a token
  * ========================================================================= */
-static Token make_token(UasTokenType type, const char *text, int64_t value,
+static Token make_token(UaTokenType type, const char *text, int64_t value,
                         int line, int column)
 {
     Token t;
@@ -181,7 +184,7 @@ static Token make_token(UasTokenType type, const char *text, int64_t value,
 
     /* Safe copy of lexeme */
     size_t len = strlen(text);
-    if (len >= UAS_MAX_TOKEN_LEN) len = UAS_MAX_TOKEN_LEN - 1;
+    if (len >= UA_MAX_TOKEN_LEN) len = UA_MAX_TOKEN_LEN - 1;
     memcpy(t.text, text, len);
     t.text[len] = '\0';
 
@@ -191,7 +194,7 @@ static Token make_token(UasTokenType type, const char *text, int64_t value,
 /* =========================================================================
  *  token_type_name()  —  human-readable token type strings
  * ========================================================================= */
-const char* token_type_name(UasTokenType type)
+const char* token_type_name(UaTokenType type)
 {
     switch (type) {
         case TOKEN_OPCODE:     return "OPCODE";
@@ -234,7 +237,7 @@ Token* tokenize(const char *source_code, int *token_count)
 
     Token *tokens = (Token *)malloc(sizeof(Token) * (size_t)capacity);
     if (!tokens) {
-        fprintf(stderr, "UAS Lexer: out of memory (initial malloc)\n");
+        fprintf(stderr, "UA Lexer: out of memory (initial malloc)\n");
         *token_count = 0;
         return NULL;
     }
@@ -275,8 +278,8 @@ Token* tokenize(const char *source_code, int *token_count)
             }
             /* Build comment text */
             size_t len = (size_t)(p - start);
-            char buf[UAS_MAX_TOKEN_LEN];
-            if (len >= UAS_MAX_TOKEN_LEN) len = UAS_MAX_TOKEN_LEN - 1;
+            char buf[UA_MAX_TOKEN_LEN];
+            if (len >= UA_MAX_TOKEN_LEN) len = UA_MAX_TOKEN_LEN - 1;
             memcpy(buf, start, len);
             buf[len] = '\0';
 
@@ -328,15 +331,15 @@ Token* tokenize(const char *source_code, int *token_count)
             while (isalnum((unsigned char)*p)) { p++; col++; }
 
             size_t len = (size_t)(p - start);
-            char buf[UAS_MAX_TOKEN_LEN];
-            if (len >= UAS_MAX_TOKEN_LEN) len = UAS_MAX_TOKEN_LEN - 1;
+            char buf[UA_MAX_TOKEN_LEN];
+            if (len >= UA_MAX_TOKEN_LEN) len = UA_MAX_TOKEN_LEN - 1;
             memcpy(buf, start, len);
             buf[len] = '\0';
 
             int64_t val = 0;
-            UasTokenType ttype = TOKEN_NUMBER;
+            UaTokenType ttype = TOKEN_NUMBER;
             if (!parse_number(buf, &val)) {
-                fprintf(stderr, "UAS Lexer: warning: invalid number '%s' "
+                fprintf(stderr, "UA Lexer: warning: invalid number '%s' "
                         "at line %d, col %d\n", buf, line, start_col);
                 ttype = TOKEN_UNKNOWN;
             }
@@ -359,8 +362,8 @@ Token* tokenize(const char *source_code, int *token_count)
             }
 
             size_t len = (size_t)(p - start);
-            char buf[UAS_MAX_TOKEN_LEN];
-            if (len >= UAS_MAX_TOKEN_LEN) len = UAS_MAX_TOKEN_LEN - 1;
+            char buf[UA_MAX_TOKEN_LEN];
+            if (len >= UA_MAX_TOKEN_LEN) len = UA_MAX_TOKEN_LEN - 1;
             memcpy(buf, start, len);
             buf[len] = '\0';
 
@@ -369,7 +372,7 @@ Token* tokenize(const char *source_code, int *token_count)
             const char *peek = p;
             while (*peek == ' ' || *peek == '\t') peek++;
 
-            UasTokenType ttype;
+            UaTokenType ttype;
             int64_t   val = 0;
 
             if (*peek == ':') {
@@ -405,7 +408,7 @@ Token* tokenize(const char *source_code, int *token_count)
         /* ---- Unknown character ---------------------------------------- */
         {
             char buf[2] = { *p, '\0' };
-            fprintf(stderr, "UAS Lexer: warning: unknown character '%c' "
+            fprintf(stderr, "UA Lexer: warning: unknown character '%c' "
                     "(0x%02X) at line %d, col %d\n",
                     *p, (unsigned char)*p, line, col);
 

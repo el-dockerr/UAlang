@@ -1,6 +1,6 @@
 /*
  * =============================================================================
- *  UAS - Unified Assembler System
+ *  UA - Unified Assembler
  *  Phase 3: 8051 Back-End (Code Generation)
  *
  *  File:    backend_8051.h
@@ -24,8 +24,8 @@
  * =============================================================================
  */
 
-#ifndef UAS_BACKEND_8051_H
-#define UAS_BACKEND_8051_H
+#ifndef UA_BACKEND_8051_H
+#define UA_BACKEND_8051_H
 
 #include "parser.h"
 #include "codegen.h"    /* CodeBuffer, free_code_buffer, hexdump */
@@ -37,7 +37,7 @@
 #define MAX_SYMBOLS  256
 
 typedef struct {
-    char    name[UAS_MAX_LABEL_LEN];   /* Label name                     */
+    char    name[UA_MAX_LABEL_LEN];   /* Label name                     */
     int     address;                   /* Byte offset from start of code */
 } Symbol;
 
@@ -59,4 +59,4 @@ typedef struct {
  */
 CodeBuffer* generate_8051(const Instruction *ir, int ir_count);
 
-#endif /* UAS_BACKEND_8051_H */
+#endif /* UA_BACKEND_8051_H */

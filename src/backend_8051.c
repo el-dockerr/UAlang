@@ -1,10 +1,10 @@
 /*
  * =============================================================================
- *  UAS - Unified Assembler System
+ *  UA - Unified Assembler
  *  Phase 3: 8051 Back-End (Code Generation)
  *
  *  File:    backend_8051.c
- *  Purpose: Two-pass assembler that translates the architecture-neutral UAS
+ *  Purpose: Two-pass assembler that translates the architecture-neutral UA
  *           IR into raw Intel 8051 (MCS-51) machine code.
  *
  *  ┌──────────────────────────────────────────────────────────────────────┐
@@ -41,7 +41,7 @@
  *  │  MOV  B, Rn  → MOV A, Rn; MOV B, A        (polyfill)              │
  *  └──────────────────────────────────────────────────────────────────────┘
  *
- *  UAS register R0-R7 map directly to 8051 R0-R7 (bank 0).
+ *  UA register R0-R7 map directly to 8051 R0-R7 (bank 0).
  *  R8-R15 are rejected at code-generation time.
  *
  *  License: MIT
@@ -68,7 +68,7 @@ static void backend_error(const Instruction *inst, const char *msg)
 {
     fprintf(stderr,
             "\n"
-            "  UAS 8051 Backend Error\n"
+            "  UA 8051 Backend Error\n"
             "  ----------------------\n"
             "  Line %d, Column %d: %s\n\n",
             inst->line, inst->column, msg);
@@ -113,12 +113,12 @@ static void symtab_init(SymbolTable *st)
 static void symtab_add(SymbolTable *st, const char *name, int address)
 {
     if (st->count >= MAX_SYMBOLS) {
-        fprintf(stderr, "UAS 8051: symbol table overflow (max %d)\n",
+        fprintf(stderr, "UA 8051: symbol table overflow (max %d)\n",
                 MAX_SYMBOLS);
         exit(1);
     }
-    strncpy(st->entries[st->count].name, name, UAS_MAX_LABEL_LEN - 1);
-    st->entries[st->count].name[UAS_MAX_LABEL_LEN - 1] = '\0';
+    strncpy(st->entries[st->count].name, name, UA_MAX_LABEL_LEN - 1);
+    st->entries[st->count].name[UA_MAX_LABEL_LEN - 1] = '\0';
     st->entries[st->count].address = address;
     st->count++;
 }
@@ -246,9 +246,7 @@ static int instruction_size_8051(const Instruction *inst)
 
         case OP_CMP:
             if (inst->operands[1].type == OPERAND_REGISTER)
-                return 4;   /* MOV A,Ra; CLR C; SUBB A,Rb; (flags set) */
-                            /* We add dummy: + ADD A, Rb to restore ... */
-                            /* Actually keep it simple: 4 bytes */
+                return 3;   /* MOV A,Ra; CLR C; SUBB A,Rb  (3 bytes) */
             else
                 return 4;   /* MOV A,Ra; CJNE A,#imm,$+3 */
 
@@ -292,6 +290,15 @@ static int instruction_size_8051(const Instruction *inst)
                 return 6;
             else
                 return 6;
+
+        case OP_INC:   /* INC Rn */
+            return 1;
+
+        case OP_DEC:   /* DEC Rn */
+            return 1;
+
+        case OP_INT:   /* LCALL vector_addr  (polyfill) */
+            return 3;
 
         default:
             (void)rd; (void)rs; (void)imm;
@@ -875,6 +882,36 @@ static void pass2_emit_code(const Instruction *ir, int ir_count,
             }
             break;
 
+        /* ----------------------------------------------------------------
+         *  INC Rd  ->  INC Rn   [0x08+n]                      1 byte
+         * ---------------------------------------------------------------- */
+        case OP_INC:
+            rd = inst->operands[0].data.reg;
+            validate_register(inst, rd);
+            emit(buf, (uint8_t)(0x08 + rd));
+            break;
+
+        /* ----------------------------------------------------------------
+         *  DEC Rd  ->  DEC Rn   [0x18+n]                      1 byte
+         * ---------------------------------------------------------------- */
+        case OP_DEC:
+            rd = inst->operands[0].data.reg;
+            validate_register(inst, rd);
+            emit(buf, (uint8_t)(0x18 + rd));
+            break;
+
+        /* ----------------------------------------------------------------
+         *  INT #val  ->  LCALL vector_addr   (polyfill)        3 bytes
+         *  8051 has no software interrupt instruction.
+         *  Interrupt vector address = (val * 8) + 3.
+         * ---------------------------------------------------------------- */
+        case OP_INT: {
+            imm = inst->operands[0].data.imm;
+            uint16_t vector = (uint16_t)((imm * 8) + 3);
+            emit_lcall(buf, vector);
+            break;
+        }
+
         default:
             backend_error(inst, "unsupported opcode for 8051 backend");
             break;
@@ -909,7 +946,7 @@ CodeBuffer* generate_8051(const Instruction *ir, int ir_count)
 
     CodeBuffer *code = create_code_buffer();
     if (!code) {
-        fprintf(stderr, "UAS 8051: out of memory\n");
+        fprintf(stderr, "UA 8051: out of memory\n");
         return NULL;
     }
 
@@ -920,7 +957,7 @@ CodeBuffer* generate_8051(const Instruction *ir, int ir_count)
 
     /* Sanity check */
     if (code->size != total_size) {
-        fprintf(stderr, "UAS 8051: WARNING — size mismatch! "
+        fprintf(stderr, "UA 8051: WARNING — size mismatch! "
                 "Emitted %d bytes but Pass 1 estimated %d.\n",
                 code->size, total_size);
     }

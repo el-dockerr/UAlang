@@ -1,6 +1,6 @@
 /*
  * =============================================================================
- *  UAS - Unified Assembler System
+ *  UA - Unified Assembler
  *  Shared Code-Generation Utilities
  *
  *  File:    codegen.c
@@ -53,7 +53,7 @@ void emit_byte(CodeBuffer *buf, uint8_t byte)
         int new_cap = buf->capacity * 2;
         uint8_t *tmp = (uint8_t *)realloc(buf->bytes, (size_t)new_cap);
         if (!tmp) {
-            fprintf(stderr, "UAS codegen: out of memory\n");
+            fprintf(stderr, "UA codegen: out of memory\n");
             exit(1);
         }
         buf->bytes    = tmp;

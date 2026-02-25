@@ -1,25 +1,25 @@
 /*
  * =============================================================================
- *  UAS - Unified Assembler System
+ *  UA - Unified Assembler
  *  Phase 5: CLI, File I/O, x86-64 Backend & JIT Execution
  *
  *  File:    main.c
  *  Purpose: CLI compiler driver with JIT support.
  *
- *   Usage:  uas <input.uas> -arch <arch> [-o output] [-sys system] [--run]
+ *   Usage:  ua <input.ua> -arch <arch> [-o output] [-sys system] [--run]
  *
  *   -o      Output file path      (default: a.out)
  *   -arch   Target architecture   (mcs51 | x86)        [mandatory]
- *   -sys    Target OS / system    (baremetal | win32)   [stored]
+ *   -sys    Target OS / system    (baremetal | win32 | linux)  [stored]
  *   --run   JIT-execute the code  (x86 only, skips .bin write)
  *
  *  Pipeline:
  *   Parse Args -> Read File -> Lexer -> Parser
  *      -> Backend (arch-specific) -> Write .bin  OR  JIT execute -> Cleanup
  *
- *  Build:  gcc -std=c99 -Wall -Wextra -pedantic -o uas.exe \
+ *  Build:  gcc -std=c99 -Wall -Wextra -pedantic -o ua.exe \
  *              main.c lexer.c parser.c codegen.c backend_8051.c \
- *              backend_x86_64.c emitter_pe.c
+ *              backend_x86_64.c emitter_pe.c emitter_elf.c
  *
  *  License: MIT
  * =============================================================================
@@ -35,6 +35,9 @@
 #include "backend_8051.h"
 #include "backend_x86_64.h"
 #include "emitter_pe.h"
+#include "emitter_elf.h"
+
+#define UA_VERSION "26.0.1-ALPHA"
 
 /* =========================================================================
  *  Platform-specific JIT headers
@@ -49,7 +52,7 @@
  *  Configuration – populated by argument parsing
  * ========================================================================= */
 typedef struct {
-    const char *input_file;     /* Path to .uas source file (mandatory)   */
+    const char *input_file;     /* Path to .ua source file (mandatory)   */
     const char *output_file;    /* Path to output binary    (default a.out) */
     const char *arch;           /* Target architecture      (mandatory)   */
     const char *sys;            /* Target OS / system       (optional)    */
@@ -62,19 +65,20 @@ typedef struct {
 static void usage(const char *progname)
 {
     fprintf(stderr,
-        "UAS - Unified Assembler System\n\n"
+        "UA - Unified Assembler\n\n"
         "Usage:\n"
-        "  %s <input.uas> -arch <architecture> [-o <output>] [-sys <system>] [--run]\n\n"
+        "  %s <input.ua> -arch <architecture> [-o <output>] [-sys <system>] [--run]\n\n"
         "Required:\n"
-        "  <input.uas>       Path to the UAS source file\n"
+        "  <input.ua>       Path to the UA source file\n"
         "  -arch <arch>      Target architecture: mcs51, x86\n\n"
         "Optional:\n"
         "  -o <output>       Output file path (default: a.out)\n"
-        "  -sys <system>     Target system:  baremetal, win32\n"
-        "  --run             JIT-execute the generated code (x86 only)\n\n"
+        "  -sys <system>     Target system:  baremetal, win32, linux\n"
+        "  --run             JIT-execute the generated code (x86 only)\n"
+        "  -v, --version     Print version information and exit\n\n"
         "Example:\n"
-        "  %s program.uas -arch x86 --run\n"
-        "  %s program.uas -arch mcs51 -o program.bin\n",
+        "  %s program.ua -arch x86 --run\n"
+        "  %s program.ua -arch mcs51 -o program.bin\n",
         progname, progname, progname);
     exit(EXIT_FAILURE);
 }
@@ -124,6 +128,11 @@ static int parse_args(int argc, char *argv[], Config *cfg)
         }
         else if (strcmp(argv[i], "--run") == 0) {
             cfg->run = 1;
+        }
+        else if (strcmp(argv[i], "-v") == 0 ||
+                 strcmp(argv[i], "--version") == 0) {
+            printf("UA - Unified Assembler v%s\n", UA_VERSION);
+            exit(EXIT_SUCCESS);
         }
         else if (argv[i][0] == '-') {
             fprintf(stderr, "Error: unknown option '%s'.\n", argv[i]);
@@ -351,7 +360,7 @@ int main(int argc, char *argv[])
     Config cfg;
     parse_args(argc, argv, &cfg);
 
-    fprintf(stderr, "UAS - Unified Assembler System\n");
+    fprintf(stderr, "UA - Unified Assembler\n");
     fprintf(stderr, "  Input  : %s\n", cfg.input_file);
     fprintf(stderr, "  Output : %s\n", cfg.output_file);
     fprintf(stderr, "  Arch   : %s\n", cfg.arch);
@@ -439,6 +448,17 @@ int main(int argc, char *argv[])
                     pe_out = "a.exe";
                 }
                 if (emit_pe_exe(pe_out, code) != 0) {
+                    rc = EXIT_FAILURE;
+                }
+            }
+            else if (cfg.sys != NULL &&
+                     str_casecmp_portable(cfg.sys, "linux") == 0) {
+                /* Emit ELF executable */
+                const char *elf_out = cfg.output_file;
+                if (strcmp(elf_out, "a.out") == 0) {
+                    elf_out = "a.elf";
+                }
+                if (emit_elf_exe(elf_out, code) != 0) {
                     rc = EXIT_FAILURE;
                 }
             }

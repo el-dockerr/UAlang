@@ -1,10 +1,10 @@
 /*
  * =============================================================================
- *  UAS - Unified Assembler System
+ *  UA - Unified Assembler
  *  Phase 2: Parser & IR Generation
  *
  *  File:    parser.h
- *  Purpose: Public interface for the UAS parser.
+ *  Purpose: Public interface for the UA parser.
  *           Defines the Intermediate Representation (IR) structures:
  *           Opcode enum, operand types, operand data, and instruction layout.
  *
@@ -18,10 +18,10 @@
  * =============================================================================
  */
 
-#ifndef UAS_PARSER_H
-#define UAS_PARSER_H
+#ifndef UA_PARSER_H
+#define UA_PARSER_H
 
-#include "lexer.h"      /* Token, UasTokenType */
+#include "lexer.h"      /* Token, UaTokenType */
 #include <stdint.h>
 
 /* =========================================================================
@@ -63,6 +63,13 @@ typedef enum {
     OP_PUSH,            /* PUSH  Rs                 push register            */
     OP_POP,             /* POP   Rd                 pop to register          */
 
+    /* --- Increment / Decrement ------------------------------------------- */
+    OP_INC,             /* INC   Rd                 increment by 1           */
+    OP_DEC,             /* DEC   Rd                 decrement by 1           */
+
+    /* --- Software Interrupt --------------------------------------------- */
+    OP_INT,             /* INT   #imm               software interrupt       */
+
     /* --- Miscellaneous -------------------------------------------------- */
     OP_NOP,             /* NOP                      no operation             */
     OP_HLT,             /* HLT                      halt execution           */
@@ -85,14 +92,14 @@ typedef enum {
  * =========================================================================
  *  A tagged union: `type` selects which field of `data` is active.
  * ========================================================================= */
-#define UAS_MAX_LABEL_LEN  64   /* Max label name length */
+#define UA_MAX_LABEL_LEN  64   /* Max label name length */
 
 typedef struct {
     OperandType type;
     union {
         int      reg;                       /* Register number (0-15)      */
         int64_t  imm;                       /* Immediate value             */
-        char     label[UAS_MAX_LABEL_LEN];  /* Label name                  */
+        char     label[UA_MAX_LABEL_LEN];  /* Label name                  */
     } data;
 } Operand;
 
@@ -113,7 +120,7 @@ typedef struct {
 typedef struct {
     /* --- Label-only entry ----------------------------------------------- */
     int     is_label;                       /* 1 = label def, 0 = instr    */
-    char    label_name[UAS_MAX_LABEL_LEN];  /* Label text (if is_label)    */
+    char    label_name[UA_MAX_LABEL_LEN];  /* Label text (if is_label)    */
 
     /* --- Instruction data ----------------------------------------------- */
     Opcode  opcode;                         /* Which operation             */
@@ -164,4 +171,4 @@ const char* opcode_name(Opcode op);
  * ------------------------------------------------------------------------- */
 const char* operand_type_name(OperandType type);
 
-#endif /* UAS_PARSER_H */
+#endif /* UA_PARSER_H */

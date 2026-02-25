@@ -1,13 +1,13 @@
 /*
  * =============================================================================
- *  UAS - Unified Assembler System
+ *  UA - Unified Assembler
  *  Phase 2: Parser & IR Generation
  *
  *  File:    parser.c
- *  Purpose: Implementation of the UAS parser.
+ *  Purpose: Implementation of the UA parser.
  *
  *  The parser walks the token stream produced by the lexer and builds a
- *  flat array of Instruction structs (the IR).  It enforces the UAS grammar:
+ *  flat array of Instruction structs (the IR).  It enforces the UA grammar:
  *
  *    program     ::= { line } EOF
  *    line        ::= [ label_def | instruction ] { COMMENT } NEWLINE
@@ -71,6 +71,9 @@ static const MnemonicEntry MNEMONIC_TABLE[] = {
     { "SHR",   OP_SHR   },
     { "MUL",   OP_MUL   },
     { "DIV",   OP_DIV   },
+    { "INC",   OP_INC   },
+    { "DEC",   OP_DEC   },
+    { "INT",   OP_INT   },
     { NULL,    OP_COUNT }       /* sentinel */
 };
 
@@ -155,6 +158,9 @@ static const OpcodeShape OPCODE_SHAPES[OP_COUNT] = {
     /* OP_RET   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
     /* OP_PUSH  */ { 1, { OPERAND_REGISTER,  OPERAND_NONE,       OPERAND_NONE } },
     /* OP_POP   */ { 1, { OPERAND_REGISTER,  OPERAND_NONE,       OPERAND_NONE } },
+    /* OP_INC   */ { 1, { OPERAND_REGISTER,  OPERAND_NONE,       OPERAND_NONE } },
+    /* OP_DEC   */ { 1, { OPERAND_REGISTER,  OPERAND_NONE,       OPERAND_NONE } },
+    /* OP_INT   */ { 1, { OPERAND_IMMEDIATE, OPERAND_NONE,       OPERAND_NONE } },
     /* OP_NOP   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
     /* OP_HLT   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
 };
@@ -170,7 +176,7 @@ static void syntax_error(const Token *tok, const char *msg)
 {
     fprintf(stderr,
             "\n"
-            "  UAS Syntax Error\n"
+            "  UA Syntax Error\n"
             "  -----------------\n"
             "  Line %d, Column %d: %s\n"
             "  Near token: '%s' (%s)\n\n",
@@ -185,7 +191,7 @@ static void syntax_error_expected(const Token *tok,
 {
     fprintf(stderr,
             "\n"
-            "  UAS Syntax Error\n"
+            "  UA Syntax Error\n"
             "  -----------------\n"
             "  Line %d, Column %d: expected %s %s\n"
             "  Got: '%s' (%s)\n\n",
@@ -224,6 +230,9 @@ const char* opcode_name(Opcode op)
         case OP_POP:   return "POP";
         case OP_NOP:   return "NOP";
         case OP_HLT:   return "HLT";
+        case OP_INC:   return "INC";
+        case OP_DEC:   return "DEC";
+        case OP_INT:   return "INT";
         default:       return "???";
     }
 }
@@ -287,7 +296,7 @@ static Instruction* ensure_ir_capacity(Instruction *ir, int count,
     Instruction *tmp = (Instruction *)realloc(
         ir, sizeof(Instruction) * (size_t)new_cap);
     if (!tmp) {
-        fprintf(stderr, "UAS Parser: out of memory (realloc failed)\n");
+        fprintf(stderr, "UA Parser: out of memory (realloc failed)\n");
         free(ir);
         return NULL;
     }
@@ -356,8 +365,8 @@ static void build_operand(const Token *tok, OperandType expected,
             syntax_error(tok, msg);
         }
         out->type = OPERAND_LABEL_REF;
-        strncpy(out->data.label, tok->text, UAS_MAX_LABEL_LEN - 1);
-        out->data.label[UAS_MAX_LABEL_LEN - 1] = '\0';
+        strncpy(out->data.label, tok->text, UA_MAX_LABEL_LEN - 1);
+        out->data.label[UA_MAX_LABEL_LEN - 1] = '\0';
         return;
     }
 
@@ -398,7 +407,7 @@ Instruction* parse(const Token *tokens, int token_count,
     Instruction *ir = (Instruction *)malloc(
         sizeof(Instruction) * (size_t)capacity);
     if (!ir) {
-        fprintf(stderr, "UAS Parser: out of memory (initial malloc)\n");
+        fprintf(stderr, "UA Parser: out of memory (initial malloc)\n");
         *instruction_count = 0;
         return NULL;
     }
@@ -424,8 +433,8 @@ Instruction* parse(const Token *tokens, int token_count,
 
             Instruction inst = make_empty_instruction(cur->line, cur->column);
             inst.is_label = 1;
-            strncpy(inst.label_name, cur->text, UAS_MAX_LABEL_LEN - 1);
-            inst.label_name[UAS_MAX_LABEL_LEN - 1] = '\0';
+            strncpy(inst.label_name, cur->text, UA_MAX_LABEL_LEN - 1);
+            inst.label_name[UA_MAX_LABEL_LEN - 1] = '\0';
 
             ir[count++] = inst;
             pos++;

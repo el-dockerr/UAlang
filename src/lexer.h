@@ -1,10 +1,10 @@
 /*
  * =============================================================================
- *  UAS - Unified Assembler System
+ *  UA - Unified Assembler
  *  Phase 1: Lexer / Tokenizer
  *
  *  File:    lexer.h
- *  Purpose: Public interface for the UAS lexical analyzer.
+ *  Purpose: Public interface for the UA lexical analyzer.
  *           Defines token types, the token structure, and the tokenizer API.
  *
  *  Design:  Architecture-agnostic.  The lexer operates on a universal register
@@ -16,8 +16,8 @@
  * =============================================================================
  */
 
-#ifndef UAS_LEXER_H
-#define UAS_LEXER_H
+#ifndef UA_LEXER_H
+#define UA_LEXER_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -46,7 +46,7 @@ typedef enum {
     TOKEN_COMMENT,      /* '; ...' kept for diagnostics, ignored by parser   */
     TOKEN_EOF,          /* End-of-input sentinel                             */
     TOKEN_UNKNOWN       /* Unrecognised character — reported as error        */
-} UasTokenType;
+} UaTokenType;
 
 /* -------------------------------------------------------------------------
  * Token Structure
@@ -57,11 +57,11 @@ typedef enum {
  *   - its numeric value (meaningful only for TOKEN_NUMBER / TOKEN_REGISTER)
  *   - source location for error reporting
  * ------------------------------------------------------------------------- */
-#define UAS_MAX_TOKEN_LEN  64   /* Maximum characters in a single lexeme */
+#define UA_MAX_TOKEN_LEN  64   /* Maximum characters in a single lexeme */
 
 typedef struct {
-    UasTokenType type;
-    char        text[UAS_MAX_TOKEN_LEN];  /* Human-readable lexeme           */
+    UaTokenType type;
+    char        text[UA_MAX_TOKEN_LEN];  /* Human-readable lexeme           */
     int64_t     value;                    /* Numeric payload (if applicable) */
     int         line;                     /* 1-based source line             */
     int         column;                   /* 1-based source column           */
@@ -87,8 +87,8 @@ Token* tokenize(const char *source_code, int *token_count);
 
 /* -------------------------------------------------------------------------
  * token_type_name()
- *   Returns a human-readable string for a given UasTokenType (for debugging).
+ *   Returns a human-readable string for a given UaTokenType (for debugging).
  * ------------------------------------------------------------------------- */
-const char* token_type_name(UasTokenType type);
+const char* token_type_name(UaTokenType type);
 
-#endif /* UAS_LEXER_H */
+#endif /* UA_LEXER_H */

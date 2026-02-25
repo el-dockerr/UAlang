@@ -1,6 +1,6 @@
 /*
  * =============================================================================
- *  UAS - Unified Assembler System
+ *  UA - Unified Assembler
  *  Phase 6: Windows PE (Portable Executable) Emitter
  *
  *  File:    emitter_pe.h
@@ -21,8 +21,8 @@
  * =============================================================================
  */
 
-#ifndef UAS_EMITTER_PE_H
-#define UAS_EMITTER_PE_H
+#ifndef UA_EMITTER_PE_H
+#define UA_EMITTER_PE_H
 
 #include "codegen.h"    /* CodeBuffer */
 
@@ -35,4 +35,4 @@
  */
 int emit_pe_exe(const char *filename, const CodeBuffer *code);
 
-#endif /* UAS_EMITTER_PE_H */
+#endif /* UA_EMITTER_PE_H */
