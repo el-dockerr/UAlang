@@ -1,0 +1,6 @@
+; --- x86-64 JIT Test ---
+; Compute 30 + 12 = 42, result in R0 (RAX)
+LDI R0, 30
+LDI R1, 12
+ADD R0, R1
+HLT

@@ -1,0 +1,7 @@
+; --- x86-64 MOV test ---
+; R0=100, copy to R2, add 50, expect RAX=150
+LDI R0, 100
+MOV R2, R0
+LDI R1, 50
+ADD R0, R1
+HLT

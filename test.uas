@@ -1,0 +1,9 @@
+; --- UAS Test Program (8051 target) ---
+; Counts R1 from 100 up by 10, stops at 255
+LDI R1, 100
+LDI R2, 10
+loop:
+  ADD R1, R2
+  CMP R1, 255
+  JNZ loop
+HLT
