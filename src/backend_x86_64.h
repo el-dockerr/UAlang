@@ -37,9 +37,11 @@
  *   Translates the architecture-neutral UA IR into raw x86-64 machine code.
  *   Returns a CodeBuffer that the caller must free with free_code_buffer().
  *
- *   Only R0-R3 are supported in Phase 5.  Unsupported opcodes cause a
- *   diagnostic on stderr followed by exit(1).
+ *   `sys` is the target system (e.g. "win32", "linux", or NULL for raw).
+ *   When sys="win32", the backend emits Windows API calls instead of
+ *   SYSCALL and appends a PE runtime (dispatchers + IAT) to the output.
  */
-CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count);
+CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count,
+                             const char *sys);
 
 #endif /* UA_BACKEND_X86_64_H */

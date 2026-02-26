@@ -30,6 +30,8 @@ CodeBuffer* create_code_buffer(void)
     buf->bytes    = (uint8_t *)malloc(INITIAL_CODE_CAPACITY);
     buf->size     = 0;
     buf->capacity = INITIAL_CODE_CAPACITY;
+    buf->pe_iat_offset = 0;
+    buf->pe_iat_count  = 0;
     if (!buf->bytes) { free(buf); return NULL; }
     return buf;
 }

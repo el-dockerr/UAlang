@@ -22,19 +22,22 @@
 ;
 ;  Entry:  R0 = address of null-terminated string
 ;  Exit:   all registers may be clobbered
+;
+;  Note:   Avoids R4 (RSP) and R5 (RBP) which are unsafe on x86-64.
+;          Uses R1 (RCX) for byte load, R0 (RAX) for zero comparison
+;          after saving the string pointer in R6 and R3.
 ; ---------------------------------------------------------------------------
 print:
     ; Save string pointer in R6 (RSI = buf for syscall)
     MOV R6, R0
 
     ; Compute string length → R2 (RDX = count for syscall)
-    ; We inline a strlen here to avoid circular dependency
     LDI R2, 0           ; length counter
     MOV R3, R0           ; working pointer
+    LDI R0, 0           ; R0 = 0 (null sentinel for comparison)
 print_strlen:
-    LOADB R4, R3         ; R4 = byte at [R3]
-    LDI R5, 0
-    CMP R4, R5           ; compare with null
+    LOADB R1, R3         ; R1 = byte at [R3]  (RCX — safe register)
+    CMP R1, R0           ; compare with null
     JZ print_write       ; if null → done counting
     INC R3               ; next byte
     INC R2               ; increment length

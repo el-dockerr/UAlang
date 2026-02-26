@@ -27,6 +27,10 @@ typedef struct {
     uint8_t *bytes;         /* Raw machine code bytes                    */
     int      size;          /* Number of valid bytes in `bytes`           */
     int      capacity;      /* Allocated capacity                        */
+
+    /* PE Win32 runtime metadata (set by backend when targeting win32) */
+    int      pe_iat_offset; /* Offset of IAT within bytes[] (0 = none)   */
+    int      pe_iat_count;  /* Number of IAT entries (incl. null term.)  */
 } CodeBuffer;
 
 /* =========================================================================

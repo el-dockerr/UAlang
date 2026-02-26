@@ -57,6 +57,16 @@
 #include <string.h>
 
 /* =========================================================================
+ *  Win32 target flag  (set by generate_x86_64 when sys="win32")
+ *
+ *  When targeting Windows, SYS emits CALL to a write dispatcher stub
+ *  and HLT emits CALL to an exit dispatcher stub (both appended after
+ *  the code/var/string data).  The stubs use the Windows x64 calling
+ *  convention and call through an Import Address Table (IAT).
+ * ========================================================================= */
+static int g_win32 = 0;
+
+/* =========================================================================
  *  x86-64 register encoding table
  * =========================================================================
  *  Index = UA register number,  Value = x86-64 register encoding.
@@ -491,7 +501,7 @@ static int instruction_size_x64(const Instruction *inst)
         case OP_PUSH:   return 1;
         case OP_POP:    return 1;
         case OP_NOP:    return 1;
-        case OP_HLT:    return 1;   /* -> RET */
+        case OP_HLT:    return g_win32 ? 5 : 1;   /* win32: CALL exit_stub; else RET */
         case OP_INT:    return 2;   /* CD ib */
 
         /* ---- Variable pseudo-instructions ----------------------------- */
@@ -521,7 +531,7 @@ static int instruction_size_x64(const Instruction *inst)
             if (rd == 5) return 3;
             return 2;
         }
-        case OP_SYS:    return 2;   /* syscall = 0F 05 */
+        case OP_SYS:    return g_win32 ? 5 : 2;   /* win32: CALL write_stub; else syscall */
 
         default:        return 0;
     }
@@ -627,10 +637,16 @@ static int x64_strtab_add(X64StringTable *st, const char *text)
 /* =========================================================================
  *  generate_x86_64()  —  main entry point  (two-pass)
  * ========================================================================= */
-CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count)
+CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count,
+                             const char *sys)
 {
-    fprintf(stderr, "[x86-64] Generating code for %d IR instructions ...\n",
-            ir_count);
+    /* Set win32 flag for instruction sizing and code generation */
+    g_win32 = (sys != NULL && (strcmp(sys, "win32") == 0 ||
+                               strcmp(sys, "Win32") == 0 ||
+                               strcmp(sys, "WIN32") == 0));
+
+    fprintf(stderr, "[x86-64] Generating code for %d IR instructions%s ...\n",
+            ir_count, g_win32 ? " (Win32 target)" : "");
 
     /* --- Pass 1: collect label addresses + variable declarations ------- */
     X64SymTab symtab;
@@ -676,6 +692,25 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count)
 
     /* String data lives after variables */
     int str_base = var_base + vartab.count * X64_VAR_SIZE;
+
+    /* --- Win32 runtime stub addresses (computed for pass 2 CALL targets) */
+    /* Layout after string data:
+     *   [write_dispatcher  84 bytes]
+     *   [exit_dispatcher   12 bytes]
+     *   [stdout_handle      8 bytes]
+     *   [written_var        8 bytes]
+     *   [IAT: 4 × 8       32 bytes]  (GetStdHandle, WriteFile, ExitProcess, null)
+     */
+    #define W32_WRITE_STUB_SIZE  84
+    #define W32_EXIT_STUB_SIZE   16
+    #define W32_DATA_SIZE        16  /* stdout_handle(8) + written(8) */
+    #define W32_IAT_SIZE         32  /* 4 entries × 8 bytes */
+    int stub_base  = str_base + strtab.total_size;  /* start of write_dispatcher */
+    int exit_base  = stub_base + W32_WRITE_STUB_SIZE;
+    /* iat_offset within code buffer = stub_base + 84 + 12 + 16 */
+    int iat_offset = stub_base + W32_WRITE_STUB_SIZE + W32_EXIT_STUB_SIZE
+                   + W32_DATA_SIZE;
+    (void)iat_offset;  /* recorded later as code->pe_iat_offset */
 
     /* --- Pass 2: code emission ----------------------------------------- */
     CodeBuffer *code = create_code_buffer();
@@ -1081,10 +1116,21 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count)
             emit_nop(code);
             break;
 
-        /* ---- HLT  ->  RET ---------------------------------- 1 byte -- */
+        /* ---- HLT ------------------------------------------------ */
         case OP_HLT:
-            fprintf(stderr, "  HLT -> RET\n");
-            emit_ret(code);
+            if (g_win32) {
+                /* CALL rel32 → exit_dispatcher */
+                int32_t rel = (int32_t)(exit_base - (code->size + 5));
+                fprintf(stderr, "  HLT -> CALL exit_dispatcher\n");
+                emit_byte(code, 0xE8);
+                emit_byte(code, (uint8_t)( rel        & 0xFF));
+                emit_byte(code, (uint8_t)((rel >>  8) & 0xFF));
+                emit_byte(code, (uint8_t)((rel >> 16) & 0xFF));
+                emit_byte(code, (uint8_t)((rel >> 24) & 0xFF));
+            } else {
+                fprintf(stderr, "  HLT -> RET\n");
+                emit_ret(code);
+            }
             break;
 
         /* ---- INT #imm  ->  INT imm8 (CD ib) --------------- 2 bytes -- */
@@ -1237,11 +1283,22 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count)
             break;
         }
 
-        /* ---- SYS  →  syscall (0F 05) ----------------------- 2 bytes -- */
+        /* ---- SYS ------------------------------------------------ */
         case OP_SYS:
-            fprintf(stderr, "  SYS -> SYSCALL\n");
-            emit_byte(code, 0x0F);
-            emit_byte(code, 0x05);
+            if (g_win32) {
+                /* CALL rel32 → write_dispatcher */
+                int32_t rel = (int32_t)(stub_base - (code->size + 5));
+                fprintf(stderr, "  SYS -> CALL write_dispatcher\n");
+                emit_byte(code, 0xE8);
+                emit_byte(code, (uint8_t)( rel        & 0xFF));
+                emit_byte(code, (uint8_t)((rel >>  8) & 0xFF));
+                emit_byte(code, (uint8_t)((rel >> 16) & 0xFF));
+                emit_byte(code, (uint8_t)((rel >> 24) & 0xFF));
+            } else {
+                fprintf(stderr, "  SYS -> SYSCALL\n");
+                emit_byte(code, 0x0F);
+                emit_byte(code, 0x05);
+            }
             break;
 
         default: {
@@ -1287,8 +1344,88 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count)
         emit_byte(code, 0x00);  /* null terminator */
     }
 
-    fprintf(stderr, "[x86-64] Emitted %d bytes (%d code + %d var + %d str)\n",
-            code->size, var_base, vartab.count * X64_VAR_SIZE,
-            strtab.total_size);
+    /* --- Append Win32 runtime (dispatcher stubs + IAT) ----------------- */
+    if (g_win32) {
+        /* All RIP-relative offsets within the stubs are constants because
+         * the layout of stubs, handle, written_var, and IAT is fixed:
+         *
+         *   Byte 0..83:    write_dispatcher  (84 bytes)
+         *   Byte 84..99:   exit_dispatcher   (16 bytes)
+         *   Byte 100..107: stdout_handle     (8 bytes)
+         *   Byte 108..115: written_var       (8 bytes)
+         *   Byte 116..123: IAT[0] GetStdHandle
+         *   Byte 124..131: IAT[1] WriteFile
+         *   Byte 132..139: IAT[2] ExitProcess
+         *   Byte 140..147: IAT[3] null terminator
+         *
+         * RIP-relative disp32 = target - instruction_end  (within stub)
+         */
+        static const uint8_t write_dispatcher[84] = {
+            /* 0  */ 0x55,                               /* push rbp              */
+            /* 1  */ 0x48, 0x89, 0xE5,                   /* mov rbp, rsp          */
+            /* 4  */ 0x48, 0x83, 0xEC, 0x40,             /* sub rsp, 64           */
+            /* 8  */ 0x49, 0x89, 0xD0,                   /* mov r8, rdx  (count)  */
+            /* 11 */ 0x48, 0x89, 0xF2,                   /* mov rdx, rsi (buffer) */
+            /* 14 */ 0x48, 0x8B, 0x0D, 0x4F,0x00,0x00,0x00,  /* mov rcx,[rip+79] → handle  (end@21, tgt@100, 100-21=79) */
+            /* 21 */ 0x48, 0x85, 0xC9,                   /* test rcx, rcx         */
+            /* 24 */ 0x75, 0x25,                         /* jnz +37 → byte 63    */
+            /* --- GetStdHandle path --- */
+            /* 26 */ 0x41, 0x50,                         /* push r8               */
+            /* 28 */ 0x52,                               /* push rdx              */
+            /* 29 */ 0x48, 0xC7, 0xC1, 0xF5,0xFF,0xFF,0xFF,  /* mov rcx, -11    */
+            /* 36 */ 0x48, 0x83, 0xEC, 0x20,             /* sub rsp, 32 (shadow)  */
+            /* 40 */ 0xFF, 0x15, 0x46,0x00,0x00,0x00,    /* call [rip+70] → IAT[0]  (end@46, tgt@116, 116-46=70) */
+            /* 46 */ 0x48, 0x83, 0xC4, 0x20,             /* add rsp, 32           */
+            /* 50 */ 0x48, 0x89, 0x05, 0x2B,0x00,0x00,0x00,  /* mov [rip+43],rax → handle  (end@57, tgt@100, 100-57=43) */
+            /* 57 */ 0x48, 0x89, 0xC1,                   /* mov rcx, rax          */
+            /* 60 */ 0x5A,                               /* pop rdx               */
+            /* 61 */ 0x41, 0x58,                         /* pop r8                */
+            /* --- have_handle: --- */
+            /* 63 */ 0x4C, 0x8D, 0x4D, 0xF8,            /* lea r9, [rbp-8]       */
+            /* 67 */ 0x48,0xC7,0x44,0x24,0x20, 0x00,0x00,0x00,0x00,  /* mov qword [rsp+32], 0 */
+            /* 76 */ 0xFF, 0x15, 0x2A,0x00,0x00,0x00,    /* call [rip+42] → IAT[1]  (end@82, tgt@124, 124-82=42) */
+            /* 82 */ 0xC9,                               /* leave                 */
+            /* 83 */ 0xC3                                /* ret                   */
+        };
+        for (int b = 0; b < 84; b++)
+            emit_byte(code, write_dispatcher[b]);
+
+        /* exit_dispatcher: align stack, then call ExitProcess(0) via IAT[2]
+         *   sub rsp,56 + and rsp,-16 guarantees 16-byte alignment
+         *   regardless of incoming RSP value.
+         *   end@16(within exit stub) = stub byte 100.
+         *   target IAT[2] = byte 132.  132-100 = 32. */
+        static const uint8_t exit_dispatcher[16] = {
+            0x31, 0xC9,                                  /* xor ecx, ecx (exit 0)   */
+            0x48, 0x83, 0xEC, 0x38,                      /* sub rsp, 56             */
+            0x48, 0x83, 0xE4, 0xF0,                      /* and rsp, -16 (align)    */
+            0xFF, 0x15, 0x20,0x00,0x00,0x00              /* call [rip+32] → IAT[2]  */
+        };
+        for (int b = 0; b < 16; b++)
+            emit_byte(code, exit_dispatcher[b]);
+
+        /* stdout_handle  (8 bytes, init 0) */
+        for (int b = 0; b < 8; b++) emit_byte(code, 0x00);
+
+        /* written_var  (8 bytes, init 0) */
+        for (int b = 0; b < 8; b++) emit_byte(code, 0x00);
+
+        /* IAT: 4 entries × 8 bytes (filled by PE emitter on disk,
+         *       patched by Windows loader at runtime) */
+        code->pe_iat_offset = code->size;
+        code->pe_iat_count  = 4;   /* GetStdHandle, WriteFile, ExitProcess, null */
+        for (int b = 0; b < 32; b++) emit_byte(code, 0x00);
+
+        fprintf(stderr, "[x86-64] Emitted %d bytes (%d code + %d var + %d str"
+                " + %d win32rt)\n",
+                code->size, var_base, vartab.count * X64_VAR_SIZE,
+                strtab.total_size,
+                W32_WRITE_STUB_SIZE + W32_EXIT_STUB_SIZE + W32_DATA_SIZE
+                + W32_IAT_SIZE);
+    } else {
+        fprintf(stderr, "[x86-64] Emitted %d bytes (%d code + %d var + %d str)\n",
+                code->size, var_base, vartab.count * X64_VAR_SIZE,
+                strtab.total_size);
+    }
     return code;
 }

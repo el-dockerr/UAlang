@@ -484,7 +484,7 @@ int main(int argc, char *argv[])
     }
     else if (str_casecmp_portable(cfg.arch, "x86") == 0) {
         /* ---- x86-64 backend ------------------------------------------- */
-        CodeBuffer *code = generate_x86_64(ir, ir_count);
+        CodeBuffer *code = generate_x86_64(ir, ir_count, cfg.sys);
         if (!code) {
             fprintf(stderr, "Error: x86-64 code generation failed.\n");
             rc = EXIT_FAILURE;

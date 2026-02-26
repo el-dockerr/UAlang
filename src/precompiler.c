@@ -498,7 +498,8 @@ static int pp_process(const char *source,
                       PPState    *state,
                       const char *base_dir,
                       int         depth,
-                      StrBuf     *output)
+                      StrBuf     *output,
+                      StrBuf     *deferred)
 {
     if (depth > PP_MAX_IMPORT_DEPTH) {
         fprintf(stderr,
@@ -781,7 +782,8 @@ static int pp_process(const char *source,
                         }
 
                         int rc = pp_process(imp_src, resolved, state,
-                                            imp_dir, depth + 1, &imp_out);
+                                            imp_dir, depth + 1, &imp_out,
+                                            NULL);
                         free(imp_src);
                         if (rc != 0) {
                             strbuf_free(&imp_out);
@@ -804,17 +806,23 @@ static int pp_process(const char *source,
                         NSLabelTable labels;
                         ns_collect_labels(imp_out.data, &labels);
 
+                        /* At depth 0, imported code is deferred to run
+                         * after the main program so that the PE/ELF
+                         * entry point lands on the first user instruction. */
+                        StrBuf *import_target =
+                            (depth == 0 && deferred) ? deferred : output;
+
                         if (labels.count > 0) {
                             /* Apply namespace prefix to all refs */
                             if (ns_apply_prefix(imp_out.data,
                                                 ns_prefix,
-                                                &labels, output) != 0) {
+                                                &labels, import_target) != 0) {
                                 strbuf_free(&imp_out);
                                 return -1;
                             }
                         } else {
                             /* No labels — append as-is (exclude NUL) */
-                            if (strbuf_append(output, imp_out.data,
+                            if (strbuf_append(import_target, imp_out.data,
                                               imp_out.size - 1) != 0) {
                                 strbuf_free(&imp_out);
                                 return -1;
@@ -923,6 +931,16 @@ char* preprocess(const char *source,
         return NULL;
     }
 
+    /* Deferred buffer: imported code is placed after main code so that
+     * the entry point in the resulting binary starts at the first user
+     * instruction rather than inside a library function. */
+    StrBuf deferred;
+    if (strbuf_init(&deferred) != 0) {
+        fprintf(stderr, "[Precompiler] Error: out of memory\n");
+        strbuf_free(&output);
+        return NULL;
+    }
+
     const char *dir  = (base_dir && *base_dir) ? base_dir : ".";
     const char *file = (filename && *filename) ? filename : "<input>";
 
@@ -935,14 +953,25 @@ char* preprocess(const char *source,
         }
     }
 
-    int rc = pp_process(source, file, &state, dir, 0, &output);
+    int rc = pp_process(source, file, &state, dir, 0, &output, &deferred);
 
     pp_state_free(&state);
 
     if (rc != 0) {
         strbuf_free(&output);
+        strbuf_free(&deferred);
         return NULL;
     }
+
+    /* Append deferred (imported) code after main code */
+    if (deferred.size > 0) {
+        if (strbuf_append(&output, deferred.data, deferred.size) != 0) {
+            strbuf_free(&output);
+            strbuf_free(&deferred);
+            return NULL;
+        }
+    }
+    strbuf_free(&deferred);
 
     /* Null-terminate the output */
     if (strbuf_append_char(&output, '\0') != 0) {
