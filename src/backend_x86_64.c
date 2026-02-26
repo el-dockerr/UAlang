@@ -504,6 +504,25 @@ static int instruction_size_x64(const Instruction *inst)
         case OP_GET:
             /* GET Rd, name  →  MOV r64, [RIP+disp32]  (7 bytes) */
             return 7;
+
+        /* ---- Phase 8: String / Byte / Syscall -------------------------- */
+        case OP_LDS:    return 7;   /* LEA r64, [RIP+disp32]  (7 bytes) */
+        case OP_LOADB: {
+            /* MOVZX r64, byte [r64]  : REX.W 0F B6 ModRM  = 4 bytes */
+            int rs = inst->operands[1].data.reg;
+            if (rs == 4) return 5;  /* RSP needs SIB */
+            if (rs == 5) return 5;  /* RBP needs disp8=0 */
+            return 4;
+        }
+        case OP_STOREB: {
+            /* MOV byte [r64], r8  : 88 ModRM  = 2 bytes (or 3 with REX) */
+            int rd = inst->operands[0].data.reg;
+            if (rd == 4) return 3;
+            if (rd == 5) return 3;
+            return 2;
+        }
+        case OP_SYS:    return 2;   /* syscall = 0F 05 */
+
         default:        return 0;
     }
 }
@@ -515,6 +534,8 @@ static int instruction_size_x64(const Instruction *inst)
  *  segment (8 bytes each for x86-64).  Their addresses are registered
  *  as symbols so that SET/GET can use the fixup mechanism for
  *  RIP-relative addressing.
+ *
+ *  String literals from LDS are stored after the variable data section.
  * ========================================================================= */
 #define X64_MAX_VARS     256
 #define X64_VAR_SIZE     8      /* bytes per variable (qword) */
@@ -559,6 +580,51 @@ static int x64_vartab_add(X64VarTable *vt, const char *name,
 }
 
 /* =========================================================================
+ *  String table — stores LDS string literals in the data section
+ * ========================================================================= */
+#define X64_MAX_STRINGS  256
+
+typedef struct {
+    char    text[UA_MAX_LABEL_LEN];
+    int     offset;     /* byte offset within string data section */
+    int     length;     /* length of string (excluding null terminator) */
+} X64StringEntry;
+
+typedef struct {
+    X64StringEntry strings[X64_MAX_STRINGS];
+    int            count;
+    int            total_size;   /* total bytes used (with null terminators) */
+} X64StringTable;
+
+static void x64_strtab_init(X64StringTable *st)
+{
+    st->count      = 0;
+    st->total_size = 0;
+}
+
+/* Add a string literal; returns the index.  De-duplicates identical strings. */
+static int x64_strtab_add(X64StringTable *st, const char *text)
+{
+    /* Check for duplicate */
+    for (int i = 0; i < st->count; i++) {
+        if (strcmp(st->strings[i].text, text) == 0)
+            return i;
+    }
+    if (st->count >= X64_MAX_STRINGS) {
+        fprintf(stderr, "x86-64: string table overflow (max %d)\n",
+                X64_MAX_STRINGS);
+        return -1;
+    }
+    X64StringEntry *e = &st->strings[st->count];
+    strncpy(e->text, text, UA_MAX_LABEL_LEN - 1);
+    e->text[UA_MAX_LABEL_LEN - 1] = '\0';
+    e->length = (int)strlen(text);
+    e->offset = st->total_size;
+    st->total_size += e->length + 1;   /* +1 for null terminator */
+    return st->count++;
+}
+
+/* =========================================================================
  *  generate_x86_64()  —  main entry point  (two-pass)
  * ========================================================================= */
 CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count)
@@ -572,6 +638,9 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count)
 
     X64VarTable vartab;
     x64_vartab_init(&vartab);
+
+    X64StringTable strtab;
+    x64_strtab_init(&strtab);
 
     int pc = 0;
     for (int i = 0; i < ir_count; i++) {
@@ -589,6 +658,10 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count)
                 has_init = 1;
             }
             x64_vartab_add(&vartab, vname, init_val, has_init);
+        } else if (inst->opcode == OP_LDS) {
+            /* Collect string literal */
+            x64_strtab_add(&strtab, inst->operands[1].data.string);
+            pc += instruction_size_x64(inst);
         } else {
             pc += instruction_size_x64(inst);
         }
@@ -600,6 +673,9 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count)
         x64_symtab_add(&symtab, vartab.vars[v].name,
                         var_base + v * X64_VAR_SIZE);
     }
+
+    /* String data lives after variables */
+    int str_base = var_base + vartab.count * X64_VAR_SIZE;
 
     /* --- Pass 2: code emission ----------------------------------------- */
     CodeBuffer *code = create_code_buffer();
@@ -1080,6 +1156,94 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count)
             break;
         }
 
+        /* ---- LDS Rd, "str"  →  LEA r64, [RIP+disp32] ------- 7 bytes - */
+        case OP_LDS: {
+            int rd = inst->operands[0].data.reg;
+            const char *str = inst->operands[1].data.string;
+            x64_validate_register(inst, rd);
+            uint8_t enc = X64_REG_ENC[rd];
+            fprintf(stderr, "  LDS R%d, \"%s\" -> LEA %s, [RIP+disp32]\n",
+                    rd, str, X64_REG_NAME[rd]);
+            /* LEA r64, [RIP+disp32] : REX.W 8D ModRM(reg, [RIP+disp32]) */
+            emit_byte(code, 0x48);  /* REX.W */
+            emit_byte(code, 0x8D);  /* LEA */
+            emit_byte(code, (uint8_t)((enc << 3) | 0x05));  /* ModRM: RIP-rel */
+            /* Find string index and compute address */
+            int str_idx = x64_strtab_add(&strtab, str);
+            int str_addr = str_base + strtab.strings[str_idx].offset;
+            int patch_off = code->size;
+            emit_rel32_placeholder(code);
+            x64_add_fixup(&symtab, "__str__", patch_off, code->size,
+                          inst->line);
+            /* Direct patch — we know the address already */
+            {
+                int32_t rel = (int32_t)(str_addr - code->size);
+                patch_rel32(code, patch_off, rel);
+            }
+            /* Remove the fixup we just added (it's already resolved) */
+            symtab.fix_count--;
+            break;
+        }
+
+        /* ---- LOADB Rd, Rs  →  MOVZX r64, byte [r64] ---- 4-5 bytes --- */
+        case OP_LOADB: {
+            int rd = inst->operands[0].data.reg;
+            int rs = inst->operands[1].data.reg;
+            x64_validate_register(inst, rd);
+            x64_validate_register(inst, rs);
+            uint8_t enc_d = X64_REG_ENC[rd];
+            uint8_t enc_s = X64_REG_ENC[rs];
+            fprintf(stderr, "  LOADB R%d, R%d -> MOVZX %s, byte [%s]\n",
+                    rd, rs, X64_REG_NAME[rd], X64_REG_NAME[rs]);
+            /* REX.W 0F B6 ModRM */
+            emit_byte(code, 0x48);
+            emit_byte(code, 0x0F);
+            emit_byte(code, 0xB6);
+            if (enc_s == 5) {
+                /* RBP needs mod=01 + disp8=0 */
+                emit_byte(code, (uint8_t)(0x40 | (enc_d << 3) | enc_s));
+                emit_byte(code, 0x00);
+            } else if (enc_s == 4) {
+                /* RSP needs SIB */
+                emit_byte(code, (uint8_t)(0x00 | (enc_d << 3) | 0x04));
+                emit_byte(code, 0x24);
+            } else {
+                emit_byte(code, (uint8_t)(0x00 | (enc_d << 3) | enc_s));
+            }
+            break;
+        }
+
+        /* ---- STOREB Rs, Rd  →  MOV byte [Rd], Rs_low8 ---- 2-3 bytes - */
+        case OP_STOREB: {
+            int rx = inst->operands[0].data.reg;
+            int ry = inst->operands[1].data.reg;
+            x64_validate_register(inst, rx);
+            x64_validate_register(inst, ry);
+            uint8_t enc_x = X64_REG_ENC[rx];
+            uint8_t enc_y = X64_REG_ENC[ry];
+            fprintf(stderr, "  STOREB R%d, R%d -> MOV byte [%s], %s_low8\n",
+                    rx, ry, X64_REG_NAME[rx], X64_REG_NAME[ry]);
+            /* 88 ModRM (MOV r/m8, r8) */
+            emit_byte(code, 0x88);
+            if (enc_x == 5) {
+                emit_byte(code, (uint8_t)(0x40 | (enc_y << 3) | enc_x));
+                emit_byte(code, 0x00);
+            } else if (enc_x == 4) {
+                emit_byte(code, (uint8_t)(0x00 | (enc_y << 3) | 0x04));
+                emit_byte(code, 0x24);
+            } else {
+                emit_byte(code, (uint8_t)(0x00 | (enc_y << 3) | enc_x));
+            }
+            break;
+        }
+
+        /* ---- SYS  →  syscall (0F 05) ----------------------- 2 bytes -- */
+        case OP_SYS:
+            fprintf(stderr, "  SYS -> SYSCALL\n");
+            emit_byte(code, 0x0F);
+            emit_byte(code, 0x05);
+            break;
+
         default: {
             char msg[128];
             snprintf(msg, sizeof(msg),
@@ -1114,7 +1278,17 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count)
         }
     }
 
-    fprintf(stderr, "[x86-64] Emitted %d bytes (%d code + %d data)\n",
-            code->size, var_base, vartab.count * X64_VAR_SIZE);
+    /* --- Append string data section -------------------------------------- */
+    for (int s = 0; s < strtab.count; s++) {
+        const char *p = strtab.strings[s].text;
+        int len = strtab.strings[s].length;
+        for (int b = 0; b < len; b++)
+            emit_byte(code, (uint8_t)p[b]);
+        emit_byte(code, 0x00);  /* null terminator */
+    }
+
+    fprintf(stderr, "[x86-64] Emitted %d bytes (%d code + %d var + %d str)\n",
+            code->size, var_base, vartab.count * X64_VAR_SIZE,
+            strtab.total_size);
     return code;
 }

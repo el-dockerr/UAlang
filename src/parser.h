@@ -75,6 +75,12 @@ typedef enum {
     OP_SET,             /* SET   name, Rs/imm        store to variable        */
     OP_GET,             /* GET   Rd, name            load from variable       */
 
+    /* --- String / Byte / Syscall (Phase 8) ----------------------------- */
+    OP_LDS,             /* LDS   Rd, "string"         load string address      */
+    OP_LOADB,           /* LOADB Rd, Rs              byte load  [Rs] -> Rd    */
+    OP_STOREB,          /* STOREB Rs, Rd             byte store Rs  -> [Rd]   */
+    OP_SYS,             /* SYS                       native syscall           */
+
     /* --- Miscellaneous -------------------------------------------------- */
     OP_NOP,             /* NOP                      no operation             */
     OP_HLT,             /* HLT                      halt execution           */
@@ -89,7 +95,8 @@ typedef enum {
     OPERAND_NONE,       /* Unused operand slot                               */
     OPERAND_REGISTER,   /* Virtual register R0-R15                           */
     OPERAND_IMMEDIATE,  /* Numeric literal                                   */
-    OPERAND_LABEL_REF   /* Symbolic reference to a label                     */
+    OPERAND_LABEL_REF,  /* Symbolic reference to a label                     */
+    OPERAND_STRING      /* String literal (for LDS)                          */
 } OperandType;
 
 /* =========================================================================
@@ -105,6 +112,7 @@ typedef struct {
         int      reg;                       /* Register number (0-15)      */
         int64_t  imm;                       /* Immediate value             */
         char     label[UA_MAX_LABEL_LEN];  /* Label name                  */
+        char     string[UA_MAX_LABEL_LEN]; /* String literal (LDS)        */
     } data;
 } Operand;
 

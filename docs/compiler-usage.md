@@ -29,7 +29,8 @@ cd src
 gcc -std=c99 -Wall -Wextra -pedantic -o UA \
     main.c lexer.c parser.c codegen.c precompiler.c \
     backend_8051.c backend_x86_64.c backend_x86_32.c backend_arm.c \
-    emitter_pe.c emitter_elf.c
+    backend_arm64.c backend_risc_v.c \
+    emitter_pe.c emitter_elf.c emitter_macho.c
 ```
 
 ### GCC on Windows (producing UA.exe)
@@ -39,7 +40,8 @@ cd src
 gcc -std=c99 -Wall -Wextra -pedantic -o UA.exe ^
     main.c lexer.c parser.c codegen.c precompiler.c ^
     backend_8051.c backend_x86_64.c backend_x86_32.c backend_arm.c ^
-    emitter_pe.c emitter_elf.c
+    backend_arm64.c backend_risc_v.c ^
+    emitter_pe.c emitter_elf.c emitter_macho.c
 ```
 
 ### Clang
@@ -49,7 +51,8 @@ cd src
 clang -std=c99 -Wall -Wextra -pedantic -o UA \
     main.c lexer.c parser.c codegen.c precompiler.c \
     backend_8051.c backend_x86_64.c backend_x86_32.c backend_arm.c \
-    emitter_pe.c emitter_elf.c
+    backend_arm64.c backend_risc_v.c \
+    emitter_pe.c emitter_elf.c emitter_macho.c
 ```
 
 ### MSVC
@@ -59,10 +62,11 @@ cd src
 cl /std:c11 /W4 /Fe:UA.exe ^
     main.c lexer.c parser.c codegen.c precompiler.c ^
     backend_8051.c backend_x86_64.c backend_x86_32.c backend_arm.c ^
-    emitter_pe.c emitter_elf.c
+    backend_arm64.c backend_risc_v.c ^
+    emitter_pe.c emitter_elf.c emitter_macho.c
 ```
 
-**Source files:** 10 `.c` files, 9 `.h` headers  
+**Source files:** 15 `.c` files, 14 `.h` headers  
 **Output:** `UA` (or `UA.exe` on Windows)  
 **Requirements:** Any C99-conformant compiler
 

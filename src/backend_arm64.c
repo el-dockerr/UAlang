@@ -734,6 +734,12 @@ static int instruction_size_a64(const Instruction *inst)
         case OP_GET:
             /* GET Rd, name -> MOVZ+MOVK X9,addr(8) + LDR Rd,[X9](4) = 12 */
             return 12;
+
+        /* ---- New Phase-8 instructions --------------------------------- */
+        case OP_LDS:    return 8;   /* MOVZ+MOVK Xd, addr (load string ptr) */
+        case OP_LOADB:  return 4;   /* LDRB Wd, [Xn]  */
+        case OP_STOREB: return 4;   /* STRB Wt, [Xn]  */
+        case OP_SYS:    return 4;   /* SVC #0          */
         default:        return 0;
     }
 }
@@ -756,6 +762,45 @@ typedef struct {
 } A64VarTable;
 
 static void a64_vartab_init(A64VarTable *vt) { vt->count = 0; }
+
+/* =========================================================================
+ *  String table for ARM64  —  collects LDS string literals
+ * ========================================================================= */
+#define A64_MAX_STRINGS 256
+
+typedef struct {
+    const char *text;
+    int         offset;
+    int         length;
+} A64StringEntry;
+
+typedef struct {
+    A64StringEntry strings[A64_MAX_STRINGS];
+    int            count;
+    int            total_size;
+} A64StringTable;
+
+static void a64_strtab_init(A64StringTable *st) {
+    st->count = 0;
+    st->total_size = 0;
+}
+
+static int a64_strtab_add(A64StringTable *st, const char *text) {
+    for (int i = 0; i < st->count; i++)
+        if (strcmp(st->strings[i].text, text) == 0) return i;
+    if (st->count >= A64_MAX_STRINGS) {
+        fprintf(stderr, "ARM64: string table overflow (max %d)\n",
+                A64_MAX_STRINGS);
+        return 0;
+    }
+    int idx = st->count++;
+    int len = (int)strlen(text);
+    st->strings[idx].text   = text;
+    st->strings[idx].offset = st->total_size;
+    st->strings[idx].length = len;
+    st->total_size += len + 1;
+    return idx;
+}
 
 static int a64_vartab_add(A64VarTable *vt, const char *name,
                            int64_t init_value, int has_init)
@@ -794,6 +839,9 @@ CodeBuffer* generate_arm64(const Instruction *ir, int ir_count)
     A64VarTable vartab;
     a64_vartab_init(&vartab);
 
+    A64StringTable strtab;
+    a64_strtab_init(&strtab);
+
     int pc = 0;
     for (int i = 0; i < ir_count; i++) {
         const Instruction *inst = &ir[i];
@@ -810,6 +858,8 @@ CodeBuffer* generate_arm64(const Instruction *ir, int ir_count)
             }
             a64_vartab_add(&vartab, vname, init_val, has_init);
         } else {
+            if (inst->opcode == OP_LDS)
+                a64_strtab_add(&strtab, inst->operands[1].data.string);
             pc += instruction_size_a64(inst);
         }
     }
@@ -820,6 +870,7 @@ CodeBuffer* generate_arm64(const Instruction *ir, int ir_count)
         a64_symtab_add(&symtab, vartab.vars[v].name,
                        var_base + v * A64_VAR_SIZE);
     }
+    int str_base = var_base + vartab.count * A64_VAR_SIZE;
 
     /* --- Pass 2: code emission ----------------------------------------- */
     CodeBuffer *code = create_code_buffer();
@@ -1300,6 +1351,64 @@ CodeBuffer* generate_arm64(const Instruction *ir, int ir_count)
             break;
         }
 
+        /* ---- LDS Rd, "str"  ->  MOVZ+MOVK Xd, addr ------- 8 bytes --- */
+        case OP_LDS: {
+            int rd = inst->operands[0].data.reg;
+            const char *str = inst->operands[1].data.string;
+            a64_validate_register(inst, rd);
+            int str_idx = a64_strtab_add(&strtab, str);
+            int str_addr = str_base + strtab.strings[str_idx].offset;
+            fprintf(stderr, "  LDS R%d, \"%s\" -> MOVZ+MOVK %s, #%d\n",
+                    rd, str, A64_REG_NAME[rd], str_addr);
+            emit_a64_load_imm32_full(code, A64_REG_ENC[rd],
+                                     (int32_t)str_addr);
+            break;
+        }
+
+        /* ---- LOADB Rd, Rs  ->  LDRB Wd, [Xn] ------------- 4 bytes --- */
+        case OP_LOADB: {
+            int rd = inst->operands[0].data.reg;
+            int rs = inst->operands[1].data.reg;
+            a64_validate_register(inst, rd);
+            a64_validate_register(inst, rs);
+            fprintf(stderr, "  LOADB R%d, R%d -> LDRB W%d, [X%d]\n",
+                    rd, rs, A64_REG_ENC[rd], A64_REG_ENC[rs]);
+            /* LDRB (unsigned offset): size=00, V=0, opc=01
+             * 0011 1001 01 imm12 Rn Rt  (imm12=0) */
+            {
+                uint32_t word = 0x39400000u
+                              | ((uint32_t)A64_REG_ENC[rs] << 5)
+                              | (uint32_t)A64_REG_ENC[rd];
+                emit_a64(code, word);
+            }
+            break;
+        }
+
+        /* ---- STOREB Rs, Rd  ->  STRB Wt, [Xn] ------------ 4 bytes --- */
+        case OP_STOREB: {
+            int rx = inst->operands[0].data.reg;
+            int ry = inst->operands[1].data.reg;
+            a64_validate_register(inst, rx);
+            a64_validate_register(inst, ry);
+            fprintf(stderr, "  STOREB R%d, R%d -> STRB W%d, [X%d]\n",
+                    rx, ry, A64_REG_ENC[rx], A64_REG_ENC[ry]);
+            /* STRB (unsigned offset): size=00, V=0, opc=00
+             * 0011 1001 00 imm12 Rn Rt  (imm12=0) */
+            {
+                uint32_t word = 0x39000000u
+                              | ((uint32_t)A64_REG_ENC[ry] << 5)
+                              | (uint32_t)A64_REG_ENC[rx];
+                emit_a64(code, word);
+            }
+            break;
+        }
+
+        /* ---- SYS  ->  SVC #0 ----------------------------- 4 bytes --- */
+        case OP_SYS:
+            fprintf(stderr, "  SYS -> SVC #0\n");
+            emit_a64_svc(code, 0);
+            break;
+
         default: {
             char msg[256];
             snprintf(msg, sizeof(msg),
@@ -1378,12 +1487,17 @@ CodeBuffer* generate_arm64(const Instruction *ir, int ir_count)
         }
     }
 
-    if (vartab.count > 0) {
-        fprintf(stderr, "[ARM64] Emitted %d bytes (%d code + %d data)\n",
-                code->size, data_start,
-                code->size - data_start);
-    } else {
-        fprintf(stderr, "[ARM64] Emitted %d bytes\n", code->size);
+    /* --- Append string data section ----------------------------------- */
+    for (int s = 0; s < strtab.count; s++) {
+        const char *p = strtab.strings[s].text;
+        int len = strtab.strings[s].length;
+        for (int b = 0; b < len; b++)
+            emit_byte(code, (uint8_t)p[b]);
+        emit_byte(code, 0x00);
     }
+
+    fprintf(stderr, "[ARM64] Emitted %d bytes (%d code + %d var + %d str)\n",
+            code->size, data_start,
+            vartab.count * A64_VAR_SIZE, strtab.total_size);
     return code;
 }

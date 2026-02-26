@@ -34,6 +34,8 @@
  *    sys       Target system string        ("win32", "linux") or NULL.
  *    base_dir  Directory of the input file (for resolving @IMPORT paths).
  *    filename  Name/path of the input file (used in diagnostic messages).
+ *    exe_dir   Directory of the compiler executable (for resolving std_*
+ *              library imports).  May be NULL if unknown.
  *
  *  Returns:
  *    Heap-allocated preprocessed source text — caller must free().
@@ -43,6 +45,7 @@ char* preprocess(const char *source,
                  const char *arch,
                  const char *sys,
                  const char *base_dir,
-                 const char *filename);
+                 const char *filename,
+                 const char *exe_dir);
 
 #endif /* UA_PRECOMPILER_H */

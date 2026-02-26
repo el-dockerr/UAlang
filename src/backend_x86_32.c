@@ -485,6 +485,18 @@ static int instruction_size_x32(const Instruction *inst)
         case OP_GET:
             /* GET Rd, name  ->  MOV r32, [disp32]  (6 bytes) */
             return 6;
+
+        /* ---- New Phase-8 instructions --------------------------------- */
+        case OP_LDS:    return 6;   /* LEA r32, [disp32]  (8D ModRM + disp32) */
+        case OP_LOADB:
+            /* MOVZX r32, byte [r32]  (0F B6 ModRM = 3 bytes, +1 for ESP/EBP) */
+            { int rs = inst->operands[1].data.reg;
+              return (rs == 4 || rs == 5) ? 4 : 3; }
+        case OP_STOREB:
+            /* MOV byte [r32], r8  (88 ModRM = 2 bytes, +1 for ESP/EBP) */
+            { int rd = inst->operands[1].data.reg;
+              return (rd == 4 || rd == 5) ? 3 : 2; }
+        case OP_SYS:    return 2;   /* INT 0x80  (CD 80) */
         default:        return 0;
     }
 }
@@ -507,6 +519,47 @@ typedef struct {
 } X32VarTable;
 
 static void x32_vartab_init(X32VarTable *vt) { vt->count = 0; }
+
+/* =========================================================================
+ *  String table for x86-32  — collects LDS string literals
+ *  String data is appended after variable data in the output.
+ * ========================================================================= */
+#define X32_MAX_STRINGS 256
+
+typedef struct {
+    const char *text;
+    int         offset;     /* byte offset within string data section */
+    int         length;     /* strlen (without null terminator)       */
+} X32StringEntry;
+
+typedef struct {
+    X32StringEntry strings[X32_MAX_STRINGS];
+    int            count;
+    int            total_size;  /* sum of (length+1) for each string */
+} X32StringTable;
+
+static void x32_strtab_init(X32StringTable *st) {
+    st->count = 0;
+    st->total_size = 0;
+}
+
+static int x32_strtab_add(X32StringTable *st, const char *text) {
+    /* De-duplicate */
+    for (int i = 0; i < st->count; i++)
+        if (strcmp(st->strings[i].text, text) == 0) return i;
+    if (st->count >= X32_MAX_STRINGS) {
+        fprintf(stderr, "x86-32: string table overflow (max %d)\n",
+                X32_MAX_STRINGS);
+        return 0;
+    }
+    int idx = st->count++;
+    int len = (int)strlen(text);
+    st->strings[idx].text   = text;
+    st->strings[idx].offset = st->total_size;
+    st->strings[idx].length = len;
+    st->total_size += len + 1;  /* +1 for null terminator */
+    return idx;
+}
 
 static int x32_vartab_add(X32VarTable *vt, const char *name,
                           int32_t init_value, int has_init)
@@ -545,6 +598,9 @@ CodeBuffer* generate_x86_32(const Instruction *ir, int ir_count)
     X32VarTable vartab;
     x32_vartab_init(&vartab);
 
+    X32StringTable strtab;
+    x32_strtab_init(&strtab);
+
     int pc = 0;
     for (int i = 0; i < ir_count; i++) {
         const Instruction *inst = &ir[i];
@@ -561,6 +617,9 @@ CodeBuffer* generate_x86_32(const Instruction *ir, int ir_count)
             }
             x32_vartab_add(&vartab, vname, init_val, has_init);
         } else {
+            /* Collect LDS string literals */
+            if (inst->opcode == OP_LDS)
+                x32_strtab_add(&strtab, inst->operands[1].data.string);
             pc += instruction_size_x32(inst);
         }
     }
@@ -571,6 +630,7 @@ CodeBuffer* generate_x86_32(const Instruction *ir, int ir_count)
         x32_symtab_add(&symtab, vartab.vars[v].name,
                         var_base + v * X32_VAR_SIZE);
     }
+    int str_base = var_base + vartab.count * X32_VAR_SIZE;
 
     /* --- Pass 2: code emission ----------------------------------------- */
     CodeBuffer *code = create_code_buffer();
@@ -1040,6 +1100,79 @@ CodeBuffer* generate_x86_32(const Instruction *ir, int ir_count)
             break;
         }
 
+        /* ---- LDS Rd, "str"  ->  LEA r32, [disp32] -------- 6 bytes ---- */
+        case OP_LDS: {
+            int rd = inst->operands[0].data.reg;
+            const char *str = inst->operands[1].data.string;
+            x32_validate_register(inst, rd);
+            uint8_t enc = X32_REG_ENC[rd];
+            fprintf(stderr, "  LDS R%d, \"%s\" -> LEA %s, [disp32]\n",
+                    rd, str, X32_REG_NAME[rd]);
+            emit_byte(code, 0x8D);  /* LEA r32, [disp32] */
+            emit_byte(code, (uint8_t)((enc << 3) | 0x05));  /* ModRM: [disp32] */
+            int str_idx = x32_strtab_add(&strtab, str);
+            int str_addr = str_base + strtab.strings[str_idx].offset;
+            int patch_off = code->size;
+            emit_rel32_placeholder(code);
+            /* Absolute fixup (instr_end=0), patched to str_addr */
+            patch_rel32(code, patch_off, (int32_t)str_addr);
+            break;
+        }
+
+        /* ---- LOADB Rd, Rs  ->  MOVZX r32, byte [r32] ---- 3-4 bytes -- */
+        case OP_LOADB: {
+            int rd = inst->operands[0].data.reg;
+            int rs = inst->operands[1].data.reg;
+            x32_validate_register(inst, rd);
+            x32_validate_register(inst, rs);
+            uint8_t enc_d = X32_REG_ENC[rd];
+            uint8_t enc_s = X32_REG_ENC[rs];
+            fprintf(stderr, "  LOADB R%d, R%d -> MOVZX %s, byte [%s]\n",
+                    rd, rs, X32_REG_NAME[rd], X32_REG_NAME[rs]);
+            emit_byte(code, 0x0F);
+            emit_byte(code, 0xB6);
+            if (enc_s == 5) {
+                emit_byte(code, (uint8_t)(0x40 | (enc_d << 3) | enc_s));
+                emit_byte(code, 0x00);
+            } else if (enc_s == 4) {
+                emit_byte(code, (uint8_t)(0x00 | (enc_d << 3) | 0x04));
+                emit_byte(code, 0x24);
+            } else {
+                emit_byte(code, (uint8_t)(0x00 | (enc_d << 3) | enc_s));
+            }
+            break;
+        }
+
+        /* ---- STOREB Rs, Rd  ->  MOV byte [Rd], Rs_low8 --- 2-3 bytes -- */
+        case OP_STOREB: {
+            int rx = inst->operands[0].data.reg;
+            int ry = inst->operands[1].data.reg;
+            x32_validate_register(inst, rx);
+            x32_validate_register(inst, ry);
+            uint8_t enc_x = X32_REG_ENC[rx];
+            uint8_t enc_y = X32_REG_ENC[ry];
+            fprintf(stderr, "  STOREB R%d, R%d -> MOV byte [%s], %s_low8\n",
+                    rx, ry, X32_REG_NAME[rx], X32_REG_NAME[ry]);
+            emit_byte(code, 0x88);
+            if (enc_x == 5) {
+                emit_byte(code, (uint8_t)(0x40 | (enc_y << 3) | enc_x));
+                emit_byte(code, 0x00);
+            } else if (enc_x == 4) {
+                emit_byte(code, (uint8_t)(0x00 | (enc_y << 3) | 0x04));
+                emit_byte(code, 0x24);
+            } else {
+                emit_byte(code, (uint8_t)(0x00 | (enc_y << 3) | enc_x));
+            }
+            break;
+        }
+
+        /* ---- SYS  ->  INT 0x80 ---------------------------- 2 bytes --- */
+        case OP_SYS:
+            fprintf(stderr, "  SYS -> INT 0x80\n");
+            emit_byte(code, 0xCD);
+            emit_byte(code, 0x80);
+            break;
+
         default: {
             char msg[128];
             snprintf(msg, sizeof(msg),
@@ -1074,7 +1207,17 @@ CodeBuffer* generate_x86_32(const Instruction *ir, int ir_count)
         emit_byte(code, (uint8_t)((val >> 24) & 0xFF));
     }
 
-    fprintf(stderr, "[x86-32] Emitted %d bytes (%d code + %d data)\n",
-            code->size, var_base, vartab.count * X32_VAR_SIZE);
+    /* --- Append string data section ------------------------------------ */
+    for (int s = 0; s < strtab.count; s++) {
+        const char *p = strtab.strings[s].text;
+        int len = strtab.strings[s].length;
+        for (int b = 0; b < len; b++)
+            emit_byte(code, (uint8_t)p[b]);
+        emit_byte(code, 0x00);  /* null terminator */
+    }
+
+    fprintf(stderr, "[x86-32] Emitted %d bytes (%d code + %d var + %d str)\n",
+            code->size, var_base, vartab.count * X32_VAR_SIZE,
+            strtab.total_size);
     return code;
 }

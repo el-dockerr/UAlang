@@ -743,6 +743,12 @@ static int instruction_size_arm(const Instruction *inst)
         case OP_GET:
             /* GET Rd, name  -> MOVW+MOVT r12,addr + LDR Rd,[r12]  (12) */
             return 12;
+
+        /* ---- New Phase-8 instructions --------------------------------- */
+        case OP_LDS:    return 8;   /* MOVW+MOVT Rd, addr  (load string ptr) */
+        case OP_LOADB:  return 4;   /* LDRB Rd, [Rs]  */
+        case OP_STOREB: return 4;   /* STRB Rs, [Rd]  */
+        case OP_SYS:    return 4;   /* SVC #0         */
         default:        return 0;
     }
 }
@@ -782,6 +788,46 @@ typedef struct {
 
 static void arm_vartab_init(ARMVarTable *vt) { vt->count = 0; }
 
+/* =========================================================================
+ *  String table for ARM  —  collects LDS string literals
+ *  String data is appended after variable data in the output.
+ * ========================================================================= */
+#define ARM_MAX_STRINGS 256
+
+typedef struct {
+    const char *text;
+    int         offset;
+    int         length;
+} ARMStringEntry;
+
+typedef struct {
+    ARMStringEntry strings[ARM_MAX_STRINGS];
+    int            count;
+    int            total_size;
+} ARMStringTable;
+
+static void arm_strtab_init(ARMStringTable *st) {
+    st->count = 0;
+    st->total_size = 0;
+}
+
+static int arm_strtab_add(ARMStringTable *st, const char *text) {
+    for (int i = 0; i < st->count; i++)
+        if (strcmp(st->strings[i].text, text) == 0) return i;
+    if (st->count >= ARM_MAX_STRINGS) {
+        fprintf(stderr, "ARM: string table overflow (max %d)\n",
+                ARM_MAX_STRINGS);
+        return 0;
+    }
+    int idx = st->count++;
+    int len = (int)strlen(text);
+    st->strings[idx].text   = text;
+    st->strings[idx].offset = st->total_size;
+    st->strings[idx].length = len;
+    st->total_size += len + 1;
+    return idx;
+}
+
 static int arm_vartab_add(ARMVarTable *vt, const char *name,
                           int32_t init_value, int has_init)
 {
@@ -819,6 +865,9 @@ CodeBuffer* generate_arm(const Instruction *ir, int ir_count)
     ARMVarTable vartab;
     arm_vartab_init(&vartab);
 
+    ARMStringTable strtab;
+    arm_strtab_init(&strtab);
+
     int pc = 0;
     for (int i = 0; i < ir_count; i++) {
         const Instruction *inst = &ir[i];
@@ -835,6 +884,8 @@ CodeBuffer* generate_arm(const Instruction *ir, int ir_count)
             }
             arm_vartab_add(&vartab, vname, init_val, has_init);
         } else {
+            if (inst->opcode == OP_LDS)
+                arm_strtab_add(&strtab, inst->operands[1].data.string);
             pc += instruction_size_arm(inst);
         }
     }
@@ -845,6 +896,7 @@ CodeBuffer* generate_arm(const Instruction *ir, int ir_count)
         arm_symtab_add(&symtab, vartab.vars[v].name,
                        var_base + v * ARM_VAR_SIZE);
     }
+    int str_base = var_base + vartab.count * ARM_VAR_SIZE;
 
     /* --- Pass 2: code emission ----------------------------------------- */
     CodeBuffer *code = create_code_buffer();
@@ -1358,6 +1410,76 @@ CodeBuffer* generate_arm(const Instruction *ir, int ir_count)
             break;
         }
 
+        /* ---- LDS Rd, "str"  ->  MOVW+MOVT Rd, addr -------- 8 bytes --- */
+        case OP_LDS: {
+            int rd = inst->operands[0].data.reg;
+            const char *str = inst->operands[1].data.string;
+            arm_validate_register(inst, rd);
+            int str_idx = arm_strtab_add(&strtab, str);
+            int str_addr = str_base + strtab.strings[str_idx].offset;
+            fprintf(stderr, "  LDS R%d, \"%s\" -> MOVW+MOVT %s, #%d\n",
+                    rd, str, ARM_REG_NAME[rd], str_addr);
+            emit_arm_load_imm32_full(code, ARM_REG_ENC[rd],
+                                     (int32_t)str_addr);
+            break;
+        }
+
+        /* ---- LOADB Rd, Rs  ->  LDRB Rd, [Rs] -------------- 4 bytes --- */
+        case OP_LOADB: {
+            int rd = inst->operands[0].data.reg;
+            int rs = inst->operands[1].data.reg;
+            arm_validate_register(inst, rd);
+            arm_validate_register(inst, rs);
+            fprintf(stderr, "  LOADB R%d, R%d -> LDRB %s, [%s]\n",
+                    rd, rs, ARM_REG_NAME[rd], ARM_REG_NAME[rs]);
+            /* LDRB: same as LDR but B=1 (bit 22) */
+            {
+                uint32_t word = ((uint32_t)ARM_COND_AL << 28)
+                              | (0x01u << 26)
+                              | (1u << 24)   /* P=1 pre-idx */
+                              | (1u << 23)   /* U=1 add */
+                              | (1u << 22)   /* B=1 byte */
+                              | (0u << 21)   /* W=0 */
+                              | (1u << 20)   /* L=1 load */
+                              | ((uint32_t)ARM_REG_ENC[rs] << 16)
+                              | ((uint32_t)ARM_REG_ENC[rd] << 12)
+                              | 0;
+                emit_arm32(code, word);
+            }
+            break;
+        }
+
+        /* ---- STOREB Rs, Rd  ->  STRB Rs, [Rd] ------------- 4 bytes --- */
+        case OP_STOREB: {
+            int rx = inst->operands[0].data.reg;
+            int ry = inst->operands[1].data.reg;
+            arm_validate_register(inst, rx);
+            arm_validate_register(inst, ry);
+            fprintf(stderr, "  STOREB R%d, R%d -> STRB %s, [%s]\n",
+                    rx, ry, ARM_REG_NAME[rx], ARM_REG_NAME[ry]);
+            /* STRB: same as STR but B=1 (bit 22) */
+            {
+                uint32_t word = ((uint32_t)ARM_COND_AL << 28)
+                              | (0x01u << 26)
+                              | (1u << 24)   /* P=1 */
+                              | (1u << 23)   /* U=1 */
+                              | (1u << 22)   /* B=1 byte */
+                              | (0u << 21)   /* W=0 */
+                              | (0u << 20)   /* L=0 store */
+                              | ((uint32_t)ARM_REG_ENC[ry] << 16)
+                              | ((uint32_t)ARM_REG_ENC[rx] << 12)
+                              | 0;
+                emit_arm32(code, word);
+            }
+            break;
+        }
+
+        /* ---- SYS  ->  SVC #0 ----------------------------- 4 bytes --- */
+        case OP_SYS:
+            fprintf(stderr, "  SYS -> SVC #0\n");
+            emit_arm_svc(code, 0);
+            break;
+
         default: {
             char msg[256];
             snprintf(msg, sizeof(msg),
@@ -1410,12 +1532,17 @@ CodeBuffer* generate_arm(const Instruction *ir, int ir_count)
         emit_byte(code, (uint8_t)((val >> 24) & 0xFF));
     }
 
-    if (vartab.count > 0) {
-        fprintf(stderr, "[ARM] Emitted %d bytes (%d code + %d data)\n",
-                code->size, data_start,
-                code->size - data_start);
-    } else {
-        fprintf(stderr, "[ARM] Emitted %d bytes\n", code->size);
+    /* --- Append string data section ----------------------------------- */
+    for (int s = 0; s < strtab.count; s++) {
+        const char *p = strtab.strings[s].text;
+        int len = strtab.strings[s].length;
+        for (int b = 0; b < len; b++)
+            emit_byte(code, (uint8_t)p[b]);
+        emit_byte(code, 0x00);
     }
+
+    fprintf(stderr, "[ARM] Emitted %d bytes (%d code + %d var + %d str)\n",
+            code->size, data_start,
+            vartab.count * ARM_VAR_SIZE, strtab.total_size);
     return code;
 }

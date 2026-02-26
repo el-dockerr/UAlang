@@ -59,9 +59,25 @@ ua program.ua -arch x86 -sys win32    # build a Windows .exe
 ua program.ua -arch x86 -sys linux    # build a Linux ELF binary
 ```
 
+## Hello World
+
+```asm
+@IMPORT std_io
+    LDS  R0, "Hello, World!\n"
+    CALL std_io.print
+    HLT
+```
+
+```bash
+ua hello.ua -arch x86 -sys linux -o hello
+./hello
+Hello, World!
+```
+
 ## Key Features
 
-- **27-instruction MVIS** — a Minimum Viable Instruction Set covering data movement, arithmetic, bitwise logic, control flow, stack operations, and software interrupts
+- **34-instruction MVIS** — a Minimum Viable Instruction Set covering data movement, arithmetic, bitwise logic, control flow, stack operations, byte-granularity memory access, string literals, and system calls
+- **Standard Libraries** — `@IMPORT std_io` and `@IMPORT std_string` for console I/O and string operations, written entirely in UA
 - **Precompiler** — `@IF_ARCH`, `@IF_SYS`, `@ENDIF` conditional compilation; `@IMPORT` with once-only file inclusion; `@DUMMY` stub markers
 - **Six backends** — Intel x86-64 (64-bit), Intel x86-32/IA-32 (32-bit), ARM ARMv7-A (32-bit), ARM64/AArch64 (64-bit, Apple Silicon), RISC-V RV64I+M (64-bit), and Intel 8051/MCS-51 (8-bit embedded)
 - **Five output modes** — raw binary, Windows PE executable, Linux ELF executable, macOS Mach-O executable, and JIT execution
@@ -130,6 +146,9 @@ UA/
 │   ├── language-reference.md   # Full instruction set documentation
 │   ├── compiler-usage.md       # CLI reference and examples
 │   └── architecture.md         # Internal design and pipeline
+├── lib/
+│   ├── std_io.ua               # Standard I/O library (print)
+│   └── std_string.ua           # Standard string library (strlen)
 └── src/
     ├── main.c                  # CLI driver, file I/O, JIT executor
     ├── precompiler.h/.c        # Preprocessor (@IF_ARCH, @IMPORT, etc.)

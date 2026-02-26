@@ -14,7 +14,9 @@ This document is the complete reference for the **Unified Assembly (UA)** instru
 6. [Functions](#functions)
 7. [Registers](#registers)
 8. [Numeric Literals](#numeric-literals)
-9. [Instruction Set](#instruction-set)
+9. [String Literals](#string-literals)
+10. [Standard Libraries](#standard-libraries)
+11. [Instruction Set](#instruction-set)
    - [Data Movement](#data-movement)
    - [Arithmetic](#arithmetic)
    - [Bitwise Logic](#bitwise-logic)
@@ -24,8 +26,8 @@ This document is the complete reference for the **Unified Assembly (UA)** instru
    - [Stack Operations](#stack-operations)
    - [System](#system)
    - [Variables](#variable-instructions)
-10. [Operand Rules](#operand-rules)
-11. [Backend-Specific Notes](#backend-specific-notes)
+12. [Operand Rules](#operand-rules)
+13. [Backend-Specific Notes](#backend-specific-notes)
 
 ---
 
@@ -389,9 +391,84 @@ Immediate values are prefixed with `#` in the instruction:
 
 ---
 
+## String Literals
+
+String literals are enclosed in double quotes and used with the `LDS` instruction:
+
+```asm
+    LDS  R0, "Hello, World!\n"
+```
+
+### Escape Sequences
+
+| Sequence | Character | Byte Value |
+|----------|-----------|------------|
+| `\n` | Newline | `0x0A` |
+| `\t` | Horizontal tab | `0x09` |
+| `\r` | Carriage return | `0x0D` |
+| `\0` | Null byte | `0x00` |
+| `\\` | Backslash | `0x5C` |
+| `\"` | Double quote | `0x22` |
+
+Any other character following a backslash is kept as-is.
+
+### Storage
+
+String data is stored in a **string table** appended after the variable data section. Each string is null-terminated. Duplicate string literals are automatically de-duplicated by the backend — identical strings share the same storage.
+
+The layout of the output binary is:
+
+```
+[ code section ][ variable data ][ string data ]
+```
+
+---
+
+## Standard Libraries
+
+UA ships with standard library files in the `lib/` directory adjacent to the compiler executable. Library files are imported using `@IMPORT` with the `std_` prefix:
+
+```asm
+@IMPORT std_io
+@IMPORT std_string
+```
+
+When a `@IMPORT` path starts with `std_`, the compiler automatically resolves it to the `lib/` directory next to the executable, appending `.ua` if needed.
+
+### std_io
+
+I/O functions for console output (currently targets x86-64 Linux syscalls).
+
+| Function | Description |
+|----------|-------------|
+| `std_io.print` | Write a null-terminated string to stdout. Pass string address in R0. |
+
+```asm
+@IMPORT std_io
+    LDS  R0, "Hello, World!\n"
+    CALL std_io.print
+    HLT
+```
+
+### std_string
+
+String manipulation functions.
+
+| Function | Description |
+|----------|-------------|
+| `std_string.strlen` | Compute the length of a null-terminated string. Pass address in R0, result returned in R1. Clobbers R2, R3. |
+
+```asm
+@IMPORT std_string
+    LDS  R0, "test"
+    CALL std_string.strlen   ; R1 = 4
+```
+
+---
+
 ## Instruction Set
 
-UA defines 30 instructions organized into eight categories. This is the **Minimum Viable Instruction Set (MVIS)**.
+UA defines 34 instructions organized into eight categories. This is the **Minimum Viable Instruction Set (MVIS)**.
 
 ### Data Movement
 
@@ -401,6 +478,9 @@ UA defines 30 instructions organized into eight categories. This is the **Minimu
 | `LDI` | `LDI Rd, #imm` | Load immediate value into Rd |
 | `LOAD` | `LOAD Rd, Rs` | Load from memory: Rd ← \[Rs\] |
 | `STORE` | `STORE Rs, Rd` | Store to memory: \[Rd\] ← Rs |
+| `LDS` | `LDS Rd, "str"` | Load string address: Rd ← pointer to string literal |
+| `LOADB` | `LOADB Rd, Rs` | Load byte from memory: Rd ← zero-extend(byte \[Rs\]) |
+| `STOREB` | `STOREB Rs, Rd` | Store byte to memory: byte \[Rd\] ← low byte of Rs |
 
 **Examples:**
 
@@ -412,6 +492,39 @@ UA defines 30 instructions organized into eight categories. This is the **Minimu
 ```
 
 > **8051 Note:** `LOAD` and `STORE` use indirect addressing (`@Ri`) and require the pointer register to be R0 or R1.
+
+#### LDS — Load String Address
+
+`LDS` loads the address of a null-terminated string literal into a register. The string data is stored after the variable data section in the output binary. Duplicate strings are de-duplicated by the backend.
+
+```asm
+    LDS  R0, "Hello, World!\n"   ; R0 = pointer to string data
+```
+
+String literals support escape sequences: `\n` (newline), `\t` (tab), `\r` (carriage return), `\0` (null), `\\` (backslash), `\"` (double quote).
+
+> **x86-64 Note:** `LDS` uses `LEA r64, [RIP+disp32]` (RIP-relative addressing). The displacement is patched during code generation.
+>
+> **x86-32 Note:** `LDS` uses `LEA r32, [disp32]` with an absolute address fixup.
+>
+> **ARM Note:** `LDS` uses `MOVW`+`MOVT` to load the absolute string address.
+>
+> **ARM64 Note:** `LDS` uses `MOVZ`+`MOVK` to load the absolute string address.
+>
+> **RISC-V Note:** `LDS` uses `LUI`+`ADDI` to load the string address.
+>
+> **8051 Note:** `LDS` emits `MOV DPTR, #imm16` (stub — 8051 has limited string support).
+
+#### LOADB / STOREB — Byte-Granularity Memory Access
+
+`LOADB` reads a single byte from the address in Rs and zero-extends it into Rd. `STOREB` writes the low byte of Rs to the address in Rd.
+
+```asm
+    LOADB R1, R0     ; R1 = zero-extend(byte at address R0)
+    STOREB R1, R0    ; byte at address R0 = low byte of R1
+```
+
+These instructions are essential for traversing null-terminated strings character by character.
 
 ### Arithmetic
 
@@ -545,6 +658,7 @@ my_function:
 | Mnemonic | Syntax | Description |
 |----------|--------|-------------|
 | `INT` | `INT #imm` | Software interrupt |
+| `SYS` | `SYS` | System call (OS-level) |
 | `NOP` | `NOP` | No operation |
 | `HLT` | `HLT` | Halt execution |
 
@@ -553,12 +667,21 @@ my_function:
 ```asm
     NOP                  ; do nothing
     INT   0x21           ; software interrupt 0x21
+    SYS                  ; invoke OS system call
     HLT                  ; stop
 ```
 
-> **x86-64 Note:** `HLT` generates `RET` (return to caller / OS). `INT` generates the native `INT n` instruction (`CD nn`).
+> **x86-64 Note:** `HLT` generates `RET` (return to caller / OS). `INT` generates the native `INT n` instruction (`CD nn`). `SYS` generates the `SYSCALL` instruction (`0F 05`).
 >
-> **8051 Note:** `HLT` generates an infinite loop (`SJMP $`, opcode `80 FE`). `INT #n` generates `LCALL` to the interrupt vector address `(n × 8) + 3`.
+> **x86-32 Note:** `SYS` generates `INT 0x80` (`CD 80`) for Linux system calls.
+>
+> **ARM Note:** `SYS` generates `SVC #0` (supervisor call).
+>
+> **ARM64 Note:** `SYS` generates `SVC #0`.
+>
+> **RISC-V Note:** `SYS` generates `ECALL`.
+>
+> **8051 Note:** `HLT` generates an infinite loop (`SJMP $`, opcode `80 FE`). `INT #n` generates `LCALL` to the interrupt vector address `(n × 8) + 3`. `SYS` is not supported (no operating system on 8051).
 
 ### Variable Instructions
 
@@ -616,7 +739,9 @@ Each instruction has a fixed **operand shape** enforced at parse time:
 | PUSH, POP | reg |
 | JMP, JZ, JNZ, CALL | label |
 | INT | imm |
-| NOP, HLT, RET | *(none)* |
+| NOP, HLT, RET, SYS | *(none)* |
+| LDS | reg, string |
+| LOADB, STOREB | reg, reg |
 | VAR | name [, imm] |
 | SET | name, reg_or_imm |
 | GET | reg, name |

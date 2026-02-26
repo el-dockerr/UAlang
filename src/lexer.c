@@ -74,6 +74,10 @@ static const char *OPCODES[] = {
     "VAR",
     "SET",
     "GET",
+    "LDS",
+    "LOADB",
+    "STOREB",
+    "SYS",
     NULL                        /* sentinel */
 };
 
@@ -206,6 +210,7 @@ const char* token_type_name(UaTokenType type)
         case TOKEN_LABEL:      return "LABEL";
         case TOKEN_LABEL_REF:  return "LABEL_REF";
         case TOKEN_IDENTIFIER: return "IDENTIFIER";
+        case TOKEN_STRING:     return "STRING";
         case TOKEN_COMMA:      return "COMMA";
         case TOKEN_COLON:      return "COLON";
         case TOKEN_LPAREN:     return "LPAREN";
@@ -304,6 +309,50 @@ Token* tokenize(const char *source_code, int *token_count)
             tokens[count++] = make_token(TOKEN_COMMA, ",", 0, line, col);
             p++;
             col++;
+            continue;
+        }
+
+        /* ---- String literal ("...") ---------------------------------- */
+        if (*p == '"') {
+            int start_col = col;
+            p++;  col++;   /* consume opening quote */
+
+            char buf[UA_MAX_TOKEN_LEN];
+            size_t bi = 0;
+
+            while (*p != '\0' && *p != '"' && *p != '\n') {
+                if (*p == '\\' && *(p + 1) != '\0') {
+                    p++;  col++;
+                    char esc;
+                    switch (*p) {
+                        case 'n':  esc = '\n'; break;
+                        case 't':  esc = '\t'; break;
+                        case 'r':  esc = '\r'; break;
+                        case '0':  esc = '\0'; break;
+                        case '\\': esc = '\\'; break;
+                        case '"':  esc = '"';  break;
+                        default:   esc = *p;   break;
+                    }
+                    if (bi < UA_MAX_TOKEN_LEN - 1) buf[bi++] = esc;
+                } else {
+                    if (bi < UA_MAX_TOKEN_LEN - 1) buf[bi++] = *p;
+                }
+                p++;  col++;
+            }
+            buf[bi] = '\0';
+
+            if (*p == '"') {
+                p++;  col++;   /* consume closing quote */
+            } else {
+                fprintf(stderr, "UA Lexer: warning: unterminated string "
+                        "literal at line %d, col %d\n", line, start_col);
+            }
+
+            tokens = ensure_capacity(tokens, count, &capacity);
+            if (!tokens) { *token_count = 0; return NULL; }
+
+            tokens[count++] = make_token(TOKEN_STRING, buf, 0,
+                                         line, start_col);
             continue;
         }
 

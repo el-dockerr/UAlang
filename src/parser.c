@@ -77,6 +77,10 @@ static const MnemonicEntry MNEMONIC_TABLE[] = {
     { "VAR",   OP_VAR   },
     { "SET",   OP_SET   },
     { "GET",   OP_GET   },
+    { "LDS",   OP_LDS   },
+    { "LOADB", OP_LOADB },
+    { "STOREB",OP_STOREB},
+    { "SYS",   OP_SYS   },
     { NULL,    OP_COUNT }       /* sentinel */
 };
 
@@ -167,6 +171,10 @@ static const OpcodeShape OPCODE_SHAPES[OP_COUNT] = {
     /* OP_VAR   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } }, /* special */
     /* OP_SET   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } }, /* special */
     /* OP_GET   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } }, /* special */
+    /* OP_LDS   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } }, /* special */
+    /* OP_LOADB */ { 2, { OPERAND_REGISTER,  OPERAND_REGISTER,   OPERAND_NONE } },
+    /* OP_STOREB*/ { 2, { OPERAND_REGISTER,  OPERAND_REGISTER,   OPERAND_NONE } },
+    /* OP_SYS   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
     /* OP_NOP   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
     /* OP_HLT   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
 };
@@ -242,6 +250,10 @@ const char* opcode_name(Opcode op)
         case OP_VAR:   return "VAR";
         case OP_SET:   return "SET";
         case OP_GET:   return "GET";
+        case OP_LDS:   return "LDS";
+        case OP_LOADB: return "LOADB";
+        case OP_STOREB:return "STOREB";
+        case OP_SYS:   return "SYS";
         default:       return "???";
     }
 }
@@ -256,6 +268,7 @@ const char* operand_type_name(OperandType type)
         case OPERAND_REGISTER:  return "REG";
         case OPERAND_IMMEDIATE: return "IMM";
         case OPERAND_LABEL_REF: return "LABEL";
+        case OPERAND_STRING:    return "STRING";
         default:                return "???";
     }
 }
@@ -642,6 +655,43 @@ Instruction* parse(const Token *tokens, int token_count,
                 strncpy(inst.operands[1].data.label,
                         name_tok->text, UA_MAX_LABEL_LEN - 1);
                 inst.operands[1].data.label[UA_MAX_LABEL_LEN - 1] = '\0';
+                inst.operand_count = 2;
+                pos++;
+
+                goto emit_instruction;
+            }
+
+            /* =============================================================
+             *  LDS Rd, "string"
+             *  Load the address of a string literal into a register.
+             *  Operand 0 = register (destination),
+             *  operand 1 = string literal (OPERAND_STRING).
+             * ============================================================= */
+            if (op == OP_LDS) {
+                const Token *reg_tok = peek(tokens, pos, token_count);
+                if (reg_tok->type != TOKEN_REGISTER) {
+                    syntax_error_expected(reg_tok, "register",
+                                          "after 'LDS'");
+                }
+                inst.operands[0].type     = OPERAND_REGISTER;
+                inst.operands[0].data.reg = (int)reg_tok->value;
+                pos++;
+
+                const Token *comma = peek(tokens, pos, token_count);
+                if (comma->type != TOKEN_COMMA) {
+                    syntax_error_expected(comma, "','", "after LDS Rd");
+                }
+                pos++;
+
+                const Token *str_tok = peek(tokens, pos, token_count);
+                if (str_tok->type != TOKEN_STRING) {
+                    syntax_error_expected(str_tok, "string literal",
+                                          "for 'LDS Rd, \"...\"'");
+                }
+                inst.operands[1].type = OPERAND_STRING;
+                strncpy(inst.operands[1].data.string,
+                        str_tok->text, UA_MAX_LABEL_LEN - 1);
+                inst.operands[1].data.string[UA_MAX_LABEL_LEN - 1] = '\0';
                 inst.operand_count = 2;
                 pos++;
 

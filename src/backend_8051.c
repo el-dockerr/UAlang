@@ -343,6 +343,18 @@ static int instruction_size_8051(const Instruction *inst)
         case OP_GET:
             return 2;       /* MOV Rn, direct    (0xA8+n, addr) */
 
+        /* ---- New Phase-8 instructions --------------------------------- */
+        case OP_LDS:
+            return 3;       /* MOV DPTR, #imm16  (0x90, high, low) */
+        case OP_LOADB:
+            return 2;       /* MOV A, @Ri; MOV Rd, A  (same as LOAD) */
+        case OP_STOREB:
+            return 2;       /* MOV A, Rs; MOV @Ri, A  (same as STORE) */
+        case OP_SYS:
+            backend_error(inst,
+                "SYS is not supported on the 8051 (baremetal, no OS)");
+            return 0;
+
         default:
             (void)rd; (void)rs; (void)imm;
             backend_error(inst, "unsupported opcode for 8051 backend");
@@ -1061,6 +1073,67 @@ static void pass2_emit_code(const Instruction *ir, int ir_count,
             emit(buf, (uint8_t)addr);
             break;
         }
+
+        /* ----------------------------------------------------------------
+         *  LDS Rd, "str"  ->  MOV DPTR, #addr16  [0x90, hi, lo]  3 bytes
+         *  Note: On 8051, string address is loaded into DPTR (16-bit).
+         *  The destination register Rd is ignored; use MOVC A,@A+DPTR
+         *  to read individual string bytes from code memory.
+         * ---------------------------------------------------------------- */
+        case OP_LDS: {
+            (void)inst->operands[0].data.reg;  /* Rd ignored on 8051 */
+            /* String address not yet computed — emit placeholder.
+             * For 8051, strings are not separately stored; this is a
+             * stub implementation. */
+            emit(buf, 0x90);  /* MOV DPTR, #imm16 */
+            emit(buf, 0x00);  /* high byte   */
+            emit(buf, 0x00);  /* low byte    */
+            break;
+        }
+
+        /* ----------------------------------------------------------------
+         *  LOADB Rd, Rs  ->  MOV A, @Ri; MOV Rd, A           2 bytes
+         *  Same as LOAD — 8051 is natively 8-bit.
+         *  Rs must be R0 or R1 (indirect addressing constraint).
+         * ---------------------------------------------------------------- */
+        case OP_LOADB:
+            rd = inst->operands[0].data.reg;
+            rs = inst->operands[1].data.reg;
+            validate_register(inst, rd);
+            if (rs != 0 && rs != 1) {
+                backend_error(inst,
+                    "LOADB: indirect source must be R0 or R1 on 8051 "
+                    "(MOV A, @Ri)");
+            }
+            emit(buf, (uint8_t)(0xE6 + rs));
+            emit_mov_rn_a(buf, rd);
+            break;
+
+        /* ----------------------------------------------------------------
+         *  STOREB Rs, Rd  ->  MOV A, Rs; MOV @Ri, A          2 bytes
+         *  Same as STORE — 8051 is natively 8-bit.
+         *  Rd must be R0 or R1 (indirect addressing constraint).
+         * ---------------------------------------------------------------- */
+        case OP_STOREB:
+            rs = inst->operands[0].data.reg;
+            rd = inst->operands[1].data.reg;
+            validate_register(inst, rs);
+            if (rd != 0 && rd != 1) {
+                backend_error(inst,
+                    "STOREB: indirect destination must be R0 or R1 on 8051 "
+                    "(MOV @Ri, A)");
+            }
+            emit_mov_a_rn(buf, rs);
+            emit(buf, (uint8_t)(0xF6 + rd));
+            break;
+
+        /* ----------------------------------------------------------------
+         *  SYS  — not supported on baremetal 8051
+         * ---------------------------------------------------------------- */
+        case OP_SYS:
+            backend_error(inst,
+                "SYS is not supported on the 8051 (baremetal, no OS)");
+            break;
 
         default:
             backend_error(inst, "unsupported opcode for 8051 backend");

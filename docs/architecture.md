@@ -260,6 +260,10 @@ Notable sizes:
 | `INC Rd` | 3 | REX.W + FF /0 |
 | `NOP` | 1 | 0x90 |
 | `HLT` | 1 | RET (0xC3) |
+| `LDS Rd, "str"` | 7 | LEA r64, [RIP+disp32] |
+| `LOADB Rd, Rs` | 4–5 | MOVZX r64, byte [r64] (RSP/RBP need SIB/disp8) |
+| `STOREB Rs, Rd` | 2–3 | MOV byte [r64], r8 (RSP/RBP need SIB/disp8) |
+| `SYS` | 2 | SYSCALL (0x0F 0x05) |
 
 #### Pass 2: Code Emission
 
@@ -290,6 +294,18 @@ for (each fixup) {
 **DIV polyfill:** The `IDIV` instruction uses implicit RDX:RAX as the dividend and clobbers both. The backend saves RDX with `PUSH`, moves the dividend to RAX, sign-extends with `CQO`, divides, moves the result, and restores RDX with `POP`.
 
 **SHL/SHR with register:** x86-64 requires the shift count in CL. The backend saves RCX with `PUSH`, moves the shift amount, performs the shift, restores RCX with `POP`, and pads with `NOP` instructions to match the fixed instruction size from pass 1.
+
+#### String Table
+
+Each backend maintains a **string table** for `LDS` instructions. During pass 1, all string literals are collected into a de-duplicated table. Identical strings share the same offset, saving space.
+
+The string table is appended after variable data in the output binary:
+
+```
+[ code (pass 2 output) ][ variable data ][ string data ]
+```
+
+The `LDS` instruction loads the absolute or RIP-relative address of the string into a register. For x86-64, this uses `LEA r64, [RIP+disp32]` where the displacement is patched to point into the string section. The string data includes a null terminator for each entry.
 
 ### x86-32 (IA-32) Backend
 

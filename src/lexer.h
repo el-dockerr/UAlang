@@ -36,6 +36,7 @@ typedef enum {
     TOKEN_LABEL,        /* Label definition   e.g.  "loop:"                  */
     TOKEN_LABEL_REF,    /* Label reference    e.g.  "loop" used as operand   */
     TOKEN_IDENTIFIER,   /* Generic identifier (future directives / macros)   */
+    TOKEN_STRING,       /* String literal  e.g. "Hello, World!"              */
 
     /* --- Punctuation ---------------------------------------------------- */
     TOKEN_COMMA,        /* ','  operand separator                            */

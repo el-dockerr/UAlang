@@ -619,6 +619,12 @@ static int instruction_size_rv(const Instruction *inst)
         case OP_GET:
             /* GET Rd, name  -> LUI+ADDI t0,addr(8) + LD Rd,0(t0)(4) = 12 */
             return 12;
+
+        /* ---- New Phase-8 instructions --------------------------------- */
+        case OP_LDS:    return 8;   /* LUI+ADDI Rd, addr (load string ptr)  */
+        case OP_LOADB:  return 4;   /* LBU Rd, 0(Rs)  */
+        case OP_STOREB: return 4;   /* SB  Rs, 0(Rd)  */
+        case OP_SYS:    return 4;   /* ECALL           */
         default:        return 0;
     }
 }
@@ -641,6 +647,45 @@ typedef struct {
 } RVVarTable;
 
 static void rv_vartab_init(RVVarTable *vt) { vt->count = 0; }
+
+/* =========================================================================
+ *  String table for RISC-V  —  collects LDS string literals
+ * ========================================================================= */
+#define RV_MAX_STRINGS 256
+
+typedef struct {
+    const char *text;
+    int         offset;
+    int         length;
+} RVStringEntry;
+
+typedef struct {
+    RVStringEntry strings[RV_MAX_STRINGS];
+    int           count;
+    int           total_size;
+} RVStringTable;
+
+static void rv_strtab_init(RVStringTable *st) {
+    st->count = 0;
+    st->total_size = 0;
+}
+
+static int rv_strtab_add(RVStringTable *st, const char *text) {
+    for (int i = 0; i < st->count; i++)
+        if (strcmp(st->strings[i].text, text) == 0) return i;
+    if (st->count >= RV_MAX_STRINGS) {
+        fprintf(stderr, "RISC-V: string table overflow (max %d)\n",
+                RV_MAX_STRINGS);
+        return 0;
+    }
+    int idx = st->count++;
+    int len = (int)strlen(text);
+    st->strings[idx].text   = text;
+    st->strings[idx].offset = st->total_size;
+    st->strings[idx].length = len;
+    st->total_size += len + 1;
+    return idx;
+}
 
 static int rv_vartab_add(RVVarTable *vt, const char *name,
                           int64_t init_value, int has_init)
@@ -679,6 +724,9 @@ CodeBuffer* generate_risc_v(const Instruction *ir, int ir_count)
     RVVarTable vartab;
     rv_vartab_init(&vartab);
 
+    RVStringTable strtab;
+    rv_strtab_init(&strtab);
+
     int pc = 0;
     for (int i = 0; i < ir_count; i++) {
         const Instruction *inst = &ir[i];
@@ -695,6 +743,8 @@ CodeBuffer* generate_risc_v(const Instruction *ir, int ir_count)
             }
             rv_vartab_add(&vartab, vname, init_val, has_init);
         } else {
+            if (inst->opcode == OP_LDS)
+                rv_strtab_add(&strtab, inst->operands[1].data.string);
             pc += instruction_size_rv(inst);
         }
     }
@@ -705,6 +755,7 @@ CodeBuffer* generate_risc_v(const Instruction *ir, int ir_count)
         rv_symtab_add(&symtab, vartab.vars[v].name,
                       var_base + v * RV_VAR_SIZE);
     }
+    int str_base = var_base + vartab.count * RV_VAR_SIZE;
 
     /* --- Pass 2: code emission ----------------------------------------- */
     CodeBuffer *code = create_code_buffer();
@@ -1179,6 +1230,53 @@ CodeBuffer* generate_risc_v(const Instruction *ir, int ir_count)
             break;
         }
 
+        /* ---- LDS Rd, "str"  ->  LUI+ADDI Rd, addr -------- 8 bytes --- */
+        case OP_LDS: {
+            int rd = inst->operands[0].data.reg;
+            const char *str = inst->operands[1].data.string;
+            rv_validate_register(inst, rd);
+            int str_idx = rv_strtab_add(&strtab, str);
+            int str_addr = str_base + strtab.strings[str_idx].offset;
+            fprintf(stderr, "  LDS R%d, \"%s\" -> LUI+ADDI %s, #%d\n",
+                    rd, str, RV_REG_NAME[rd], str_addr);
+            emit_rv_load_imm_full(code, RV_REG_ENC[rd], (int32_t)str_addr);
+            break;
+        }
+
+        /* ---- LOADB Rd, Rs  ->  LBU Rd, 0(Rs) ------------- 4 bytes --- */
+        case OP_LOADB: {
+            int rd = inst->operands[0].data.reg;
+            int rs = inst->operands[1].data.reg;
+            rv_validate_register(inst, rd);
+            rv_validate_register(inst, rs);
+            fprintf(stderr, "  LOADB R%d, R%d -> LBU %s, 0(%s)\n",
+                    rd, rs, RV_REG_NAME[rd], RV_REG_NAME[rs]);
+            /* LBU: I-type, funct3=0x4, opcode=0x03 */
+            emit_rv32(code, rv_i_type(0, RV_REG_ENC[rs], 0x4,
+                                      RV_REG_ENC[rd], RV_OP_LOAD));
+            break;
+        }
+
+        /* ---- STOREB Rs, Rd  ->  SB Rs, 0(Rd) ------------- 4 bytes --- */
+        case OP_STOREB: {
+            int rx = inst->operands[0].data.reg;
+            int ry = inst->operands[1].data.reg;
+            rv_validate_register(inst, rx);
+            rv_validate_register(inst, ry);
+            fprintf(stderr, "  STOREB R%d, R%d -> SB %s, 0(%s)\n",
+                    rx, ry, RV_REG_NAME[rx], RV_REG_NAME[ry]);
+            /* SB: S-type, funct3=0x0, opcode=0x23 */
+            emit_rv32(code, rv_s_type(0, RV_REG_ENC[rx], RV_REG_ENC[ry],
+                                      0x0, RV_OP_STORE));
+            break;
+        }
+
+        /* ---- SYS  ->  ECALL ----------------------------- 4 bytes --- */
+        case OP_SYS:
+            fprintf(stderr, "  SYS -> ECALL\n");
+            emit_rv_ecall(code);
+            break;
+
         default: {
             char msg[256];
             snprintf(msg, sizeof(msg),
@@ -1238,12 +1336,17 @@ CodeBuffer* generate_risc_v(const Instruction *ir, int ir_count)
         }
     }
 
-    if (vartab.count > 0) {
-        fprintf(stderr, "[RISC-V] Emitted %d bytes (%d code + %d data)\n",
-                code->size, data_start,
-                code->size - data_start);
-    } else {
-        fprintf(stderr, "[RISC-V] Emitted %d bytes\n", code->size);
+    /* --- Append string data section ----------------------------------- */
+    for (int s = 0; s < strtab.count; s++) {
+        const char *p = strtab.strings[s].text;
+        int len = strtab.strings[s].length;
+        for (int b = 0; b < len; b++)
+            emit_byte(code, (uint8_t)p[b]);
+        emit_byte(code, 0x00);
     }
+
+    fprintf(stderr, "[RISC-V] Emitted %d bytes (%d code + %d var + %d str)\n",
+            code->size, data_start,
+            vartab.count * RV_VAR_SIZE, strtab.total_size);
     return code;
 }

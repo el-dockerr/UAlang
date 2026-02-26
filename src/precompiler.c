@@ -236,14 +236,17 @@ static char* pp_read_file(const char *path)
 typedef struct {
     const char *arch;                           /* -arch value              */
     const char *sys;                            /* -sys  value  (or NULL)   */
+    const char *exe_dir;                        /* compiler executable dir  */
     char       *imported[PP_MAX_IMPORTS];       /* normalised import paths  */
     int         import_count;
 } PPState;
 
-static void pp_state_init(PPState *st, const char *arch, const char *sys)
+static void pp_state_init(PPState *st, const char *arch, const char *sys,
+                          const char *exe_dir)
 {
     st->arch         = arch;
     st->sys          = sys;
+    st->exe_dir      = exe_dir;
     st->import_count = 0;
 }
 
@@ -688,9 +691,58 @@ static int pp_process(const char *source,
                         return -1;
                     }
 
+                    /* ---- std_* library resolution ---------------------
+                     * If the import name starts with "std_" and has no
+                     * path separator, resolve it as a standard library
+                     * from <exe_dir>/lib/<name>.ua                        */
+                    int is_std_lib = 0;
+                    char std_path[PP_MAX_PATH_LEN];
+                    if (plen >= 4 &&
+                        import_path[0] == 's' &&
+                        import_path[1] == 't' &&
+                        import_path[2] == 'd' &&
+                        import_path[3] == '_') {
+                        /* Check no path separators in name */
+                        int has_sep = 0;
+                        for (int ci = 0; ci < plen; ci++) {
+                            if (import_path[ci] == '/' ||
+                                import_path[ci] == '\\') {
+                                has_sep = 1;
+                                break;
+                            }
+                        }
+                        if (!has_sep && state->exe_dir != NULL) {
+                            /* Build <exe_dir>/lib/<name>.ua */
+                            int elen = (int)strlen(state->exe_dir);
+                            /* Append .ua if not already present */
+                            const char *ext = "";
+                            if (plen < 3 ||
+                                import_path[plen-3] != '.' ||
+                                import_path[plen-2] != 'u' ||
+                                import_path[plen-1] != 'a') {
+                                ext = ".ua";
+                            }
+                            int needed = elen + 5 + plen + (int)strlen(ext) + 1;
+                            if (needed < PP_MAX_PATH_LEN) {
+                                snprintf(std_path, (size_t)(PP_MAX_PATH_LEN - 1),
+                                         "%s/lib/%.*s%s",
+                                         state->exe_dir,
+                                         (int)(PP_MAX_PATH_LEN - elen - 6),
+                                         import_path, ext);
+                                std_path[PP_MAX_PATH_LEN - 1] = '\0';
+                                pp_normalize_seps(std_path);
+                                is_std_lib = 1;
+                            }
+                        }
+                    }
+
                     /* Resolve to a normalised full path */
                     char resolved[PP_MAX_PATH_LEN];
-                    if (pp_resolve_path(base_dir, import_path,
+                    if (is_std_lib) {
+                        /* Use the std library path directly */
+                        strncpy(resolved, std_path, PP_MAX_PATH_LEN - 1);
+                        resolved[PP_MAX_PATH_LEN - 1] = '\0';
+                    } else if (pp_resolve_path(base_dir, import_path,
                                         resolved, PP_MAX_PATH_LEN) != 0) {
                         fprintf(stderr,
                                 "[Precompiler] %s:%d: import path "
@@ -854,7 +906,8 @@ char* preprocess(const char *source,
                  const char *arch,
                  const char *sys,
                  const char *base_dir,
-                 const char *filename)
+                 const char *filename,
+                 const char *exe_dir)
 {
     if (!source || !arch) {
         fprintf(stderr, "[Precompiler] Error: NULL source or arch\n");
@@ -862,7 +915,7 @@ char* preprocess(const char *source,
     }
 
     PPState state;
-    pp_state_init(&state, arch, sys);
+    pp_state_init(&state, arch, sys, exe_dir);
 
     StrBuf output;
     if (strbuf_init(&output) != 0) {

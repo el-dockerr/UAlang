@@ -65,6 +65,7 @@ typedef struct {
     const char *arch;           /* Target architecture      (mandatory)   */
     const char *sys;            /* Target OS / system       (optional)    */
     int         run;            /* 1 = JIT execute, 0 = write .bin        */
+    char        exe_dir[1024];  /* Directory of compiler executable       */
 } Config;
 
 /* =========================================================================
@@ -107,9 +108,28 @@ static int parse_args(int argc, char *argv[], Config *cfg)
     cfg->arch        = NULL;
     cfg->sys         = NULL;
     cfg->run         = 0;
+    cfg->exe_dir[0]  = '\0';
 
     if (argc < 2) {
         usage(argv[0]);
+    }
+
+    /* Compute exe_dir from argv[0] */
+    {
+        const char *last_sep = NULL;
+        for (const char *p = argv[0]; *p; p++) {
+            if (*p == '/' || *p == '\\') last_sep = p;
+        }
+        if (last_sep) {
+            int dlen = (int)(last_sep - argv[0]);
+            if (dlen >= (int)sizeof(cfg->exe_dir))
+                dlen = (int)sizeof(cfg->exe_dir) - 1;
+            memcpy(cfg->exe_dir, argv[0], (size_t)dlen);
+            cfg->exe_dir[dlen] = '\0';
+        } else {
+            cfg->exe_dir[0] = '.';
+            cfg->exe_dir[1] = '\0';
+        }
     }
 
     int i = 1;
@@ -403,7 +423,8 @@ int main(int argc, char *argv[])
         }
     }
     char *preprocessed = preprocess(source, cfg.arch, cfg.sys,
-                                    base_dir, cfg.input_file);
+                                    base_dir, cfg.input_file,
+                                    cfg.exe_dir);
     if (!preprocessed) {
         fprintf(stderr, "Error: preprocessing failed.\n");
         free(source);
