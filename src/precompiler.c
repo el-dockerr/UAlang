@@ -280,6 +280,204 @@ static int pp_mark_imported(PPState *st, const char *path)
 }
 
 /* =========================================================================
+ *  Namespace prefixing for @IMPORT
+ *
+ *  When a file is imported, all of its labels (and variable definitions)
+ *  are scoped under a namespace derived from the import filename.
+ *  E.g., importing "math.ua" makes its label "add:" accessible as
+ *  "math.add" and its function "sum(x,y):" become "math.sum(x,y)".
+ *
+ *  Algorithm:
+ *    Pass 1: Collect all label definitions from the preprocessed text.
+ *    Pass 2: Replace every standalone occurrence of a collected label
+ *            name with "prefix.name" (unless already qualified with .).
+ * ========================================================================= */
+
+#define PP_MAX_NS_LABELS 256    /* Max labels per imported file              */
+#define PP_MAX_NS_NAME   128    /* Max identifier length in namespace logic  */
+
+typedef struct {
+    char names[PP_MAX_NS_LABELS][PP_MAX_NS_NAME];
+    int  count;
+} NSLabelTable;
+
+/* Is 'c' a valid identifier character?  (letter, digit, underscore) */
+static int pp_is_ident_char(char c)
+{
+    return (c >= 'A' && c <= 'Z') ||
+           (c >= 'a' && c <= 'z') ||
+           (c >= '0' && c <= '9') ||
+           c == '_';
+}
+
+/* Can 'c' start an identifier?  (letter, underscore) */
+static int pp_is_ident_start(char c)
+{
+    return (c >= 'A' && c <= 'Z') ||
+           (c >= 'a' && c <= 'z') ||
+           c == '_';
+}
+
+/* Extract basename from a file path (without extension).
+ * E.g., "lib/math.ua" -> "math", "helpers" -> "helpers" */
+static void pp_extract_basename(const char *path,
+                                char *basename, int size)
+{
+    /* Find the last path separator */
+    const char *p        = path;
+    const char *last_sep = NULL;
+    while (*p) {
+        if (*p == '/' || *p == '\\') last_sep = p;
+        p++;
+    }
+    const char *name = last_sep ? last_sep + 1 : path;
+
+    /* Find the last dot (extension separator) */
+    const char *dot = NULL;
+    p = name;
+    while (*p) {
+        if (*p == '.') dot = p;
+        p++;
+    }
+
+    int len = dot ? (int)(dot - name) : (int)strlen(name);
+    if (len >= size) len = size - 1;
+    if (len <= 0)    len = 0;
+    memcpy(basename, name, (size_t)len);
+    basename[len] = '\0';
+}
+
+/* Add a label name to the namespace table (de-duplicated). */
+static void ns_add_label(NSLabelTable *tbl, const char *name, int len)
+{
+    if (tbl->count >= PP_MAX_NS_LABELS) return;
+    if (len <= 0 || len >= PP_MAX_NS_NAME) return;
+
+    /* Check for duplicates */
+    for (int i = 0; i < tbl->count; i++) {
+        if ((int)strlen(tbl->names[i]) == len &&
+            memcmp(tbl->names[i], name, (size_t)len) == 0)
+            return;
+    }
+    memcpy(tbl->names[tbl->count], name, (size_t)len);
+    tbl->names[tbl->count][len] = '\0';
+    tbl->count++;
+}
+
+/* Check if an identifier (given as pointer + length) is in the table. */
+static int ns_is_label(const NSLabelTable *tbl, const char *name, int len)
+{
+    for (int i = 0; i < tbl->count; i++) {
+        if ((int)strlen(tbl->names[i]) == len &&
+            memcmp(tbl->names[i], name, (size_t)len) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* Pass 1: Collect all label definitions from preprocessed text.
+ *
+ * A label definition is a line whose first non-whitespace content is
+ * an identifier followed (possibly after whitespace) by ':' or '('.
+ * This catches both plain labels (start:) and function labels (add(x,y):).
+ */
+static void ns_collect_labels(const char *text, NSLabelTable *tbl)
+{
+    tbl->count = 0;
+    const char *p = text;
+
+    while (*p) {
+        const char *line = p;
+        while (*p && *p != '\n') p++;
+        int line_len = (int)(p - line);
+        if (*p == '\n') p++;
+
+        /* Skip leading whitespace */
+        const char *s = line;
+        while (s < line + line_len && (*s == ' ' || *s == '\t')) s++;
+
+        /* Check: identifier at start of trimmed line */
+        if (s < line + line_len && pp_is_ident_start(*s)) {
+            const char *id_start = s;
+            while (s < line + line_len && pp_is_ident_char(*s)) s++;
+            int id_len = (int)(s - id_start);
+
+            /* Skip optional whitespace after identifier */
+            while (s < line + line_len && (*s == ' ' || *s == '\t')) s++;
+
+            /* If followed by ':' or '(' → label definition */
+            if (s < line + line_len && (*s == ':' || *s == '(')) {
+                ns_add_label(tbl, id_start, id_len);
+            }
+            /* Check for VAR declaration: "VAR name" -> collect name */
+            if (id_len == 3 &&
+                (id_start[0] == 'V' || id_start[0] == 'v') &&
+                (id_start[1] == 'A' || id_start[1] == 'a') &&
+                (id_start[2] == 'R' || id_start[2] == 'r')) {
+                /* Skip whitespace after VAR */
+                while (s < line + line_len &&
+                       (*s == ' ' || *s == '\t')) s++;
+                if (s < line + line_len && pp_is_ident_start(*s)) {
+                    const char *var_start = s;
+                    while (s < line + line_len &&
+                           pp_is_ident_char(*s)) s++;
+                    int var_len = (int)(s - var_start);
+                    ns_add_label(tbl, var_start, var_len);
+                }
+            }        }
+    }
+}
+
+/* Pass 2: Re-emit text with all label references prefixed.
+ *
+ * For every identifier in the text that matches a collected label name
+ * and is NOT already namespace-qualified (preceded by '.') and NOT
+ * part of a numeric literal (preceded by a digit), emit "prefix.name"
+ * instead of "name".
+ *
+ * Returns 0 on success, -1 on memory error. */
+static int ns_apply_prefix(const char *text, const char *prefix,
+                           const NSLabelTable *tbl, StrBuf *out)
+{
+    int prefix_len = (int)strlen(prefix);
+    const char *p  = text;
+
+    while (*p) {
+        /* If current char cannot start an identifier, emit it as-is */
+        if (!pp_is_ident_start(*p)) {
+            if (strbuf_append_char(out, *p) != 0) return -1;
+            p++;
+            continue;
+        }
+
+        /* Collect the full identifier */
+        const char *id_start = p;
+        while (*p && pp_is_ident_char(*p)) p++;
+        int id_len = (int)(p - id_start);
+
+        /* Determine if the identifier is already qualified or is part
+         * of a hex/numeric literal (e.g., 0xFF → 'x' starts ident). */
+        int skip_prefix = 0;
+        if (id_start > text) {
+            char prev = *(id_start - 1);
+            if (prev == '.' || (prev >= '0' && prev <= '9'))
+                skip_prefix = 1;
+        }
+
+        /* Check if the identifier matches a known label */
+        if (!skip_prefix && ns_is_label(tbl, id_start, id_len)) {
+            if (strbuf_append(out, prefix, prefix_len) != 0) return -1;
+            if (strbuf_append_char(out, '.') != 0) return -1;
+        }
+
+        /* Emit the identifier itself */
+        if (strbuf_append(out, id_start, id_len) != 0) return -1;
+    }
+
+    return 0;
+}
+
+/* =========================================================================
  *  Internal preprocessing worker  (recursive for @IMPORT)
  *
  *  Walks the source line-by-line, evaluates directives, and appends
@@ -520,10 +718,57 @@ static int pp_process(const char *source,
                         fprintf(stderr,
                                 "[Precompiler] Importing '%s'\n", resolved);
 
+                        /* ---- Namespace prefixing ----------------------
+                         * Process the imported file into a temporary
+                         * buffer, then apply namespace prefix to all
+                         * label definitions and references. */
+                        StrBuf imp_out;
+                        if (strbuf_init(&imp_out) != 0) {
+                            free(imp_src);
+                            return -1;
+                        }
+
                         int rc = pp_process(imp_src, resolved, state,
-                                            imp_dir, depth + 1, output);
+                                            imp_dir, depth + 1, &imp_out);
                         free(imp_src);
-                        if (rc != 0) return rc;
+                        if (rc != 0) {
+                            strbuf_free(&imp_out);
+                            return rc;
+                        }
+
+                        /* Null-terminate the temp buffer for scanning */
+                        if (strbuf_append_char(&imp_out, '\0') != 0) {
+                            strbuf_free(&imp_out);
+                            return -1;
+                        }
+
+                        /* Extract basename for namespace prefix */
+                        char ns_prefix[PP_MAX_NS_NAME];
+                        pp_extract_basename(import_path,
+                                            ns_prefix,
+                                            (int)sizeof(ns_prefix));
+
+                        /* Collect label definitions and apply prefix */
+                        NSLabelTable labels;
+                        ns_collect_labels(imp_out.data, &labels);
+
+                        if (labels.count > 0) {
+                            /* Apply namespace prefix to all refs */
+                            if (ns_apply_prefix(imp_out.data,
+                                                ns_prefix,
+                                                &labels, output) != 0) {
+                                strbuf_free(&imp_out);
+                                return -1;
+                            }
+                        } else {
+                            /* No labels — append as-is (exclude NUL) */
+                            if (strbuf_append(output, imp_out.data,
+                                              imp_out.size - 1) != 0) {
+                                strbuf_free(&imp_out);
+                                return -1;
+                            }
+                        }
+                        strbuf_free(&imp_out);
                     } else {
                         fprintf(stderr,
                                 "[Precompiler] %s:%d: '%s' already imported "

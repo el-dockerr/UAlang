@@ -71,6 +71,9 @@ static const char *OPCODES[] = {
     "INC",
     "DEC",
     "INT",
+    "VAR",
+    "SET",
+    "GET",
     NULL                        /* sentinel */
 };
 
@@ -205,6 +208,8 @@ const char* token_type_name(UaTokenType type)
         case TOKEN_IDENTIFIER: return "IDENTIFIER";
         case TOKEN_COMMA:      return "COMMA";
         case TOKEN_COLON:      return "COLON";
+        case TOKEN_LPAREN:     return "LPAREN";
+        case TOKEN_RPAREN:     return "RPAREN";
         case TOKEN_NEWLINE:    return "NEWLINE";
         case TOKEN_COMMENT:    return "COMMENT";
         case TOKEN_EOF:        return "EOF";
@@ -313,6 +318,28 @@ Token* tokenize(const char *source_code, int *token_count)
             continue;
         }
 
+        /* ---- Left parenthesis ----------------------------------------- */
+        if (*p == '(') {
+            tokens = ensure_capacity(tokens, count, &capacity);
+            if (!tokens) { *token_count = 0; return NULL; }
+
+            tokens[count++] = make_token(TOKEN_LPAREN, "(", 0, line, col);
+            p++;
+            col++;
+            continue;
+        }
+
+        /* ---- Right parenthesis ---------------------------------------- */
+        if (*p == ')') {
+            tokens = ensure_capacity(tokens, count, &capacity);
+            if (!tokens) { *token_count = 0; return NULL; }
+
+            tokens[count++] = make_token(TOKEN_RPAREN, ")", 0, line, col);
+            p++;
+            col++;
+            continue;
+        }
+
         /* ---- Numeric literal ------------------------------------------ */
         if (isdigit((unsigned char)*p) ||
             (*p == '-' && isdigit((unsigned char)*(p + 1)))) {
@@ -368,7 +395,9 @@ Token* tokenize(const char *source_code, int *token_count)
             buf[len] = '\0';
 
             /* Peek ahead: if the next non-space character is ':', this is
-             * a label definition.  We consume the colon as well.           */
+             * a label definition.  We consume the colon as well.
+             * BUT: if it's '(' instead, it's a function definition — do NOT
+             * consume it here; let the parser handle the parentheses.       */
             const char *peek = p;
             while (*peek == ' ' || *peek == '\t') peek++;
 

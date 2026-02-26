@@ -70,6 +70,11 @@ typedef enum {
     /* --- Software Interrupt --------------------------------------------- */
     OP_INT,             /* INT   #imm               software interrupt       */
 
+    /* --- Variables ------------------------------------------------------- */
+    OP_VAR,             /* VAR   name [, init]       declare variable         */
+    OP_SET,             /* SET   name, Rs/imm        store to variable        */
+    OP_GET,             /* GET   Rd, name            load from variable       */
+
     /* --- Miscellaneous -------------------------------------------------- */
     OP_NOP,             /* NOP                      no operation             */
     OP_HLT,             /* HLT                      halt execution           */
@@ -92,7 +97,7 @@ typedef enum {
  * =========================================================================
  *  A tagged union: `type` selects which field of `data` is active.
  * ========================================================================= */
-#define UA_MAX_LABEL_LEN  64   /* Max label name length */
+#define UA_MAX_LABEL_LEN  128  /* Max label name length */
 
 typedef struct {
     OperandType type;
@@ -116,11 +121,17 @@ typedef struct {
  *                 the operation.
  * ========================================================================= */
 #define MAX_OPERANDS  3
+#define MAX_FUNC_PARAMS  8    /* Max parameters per function definition */
 
 typedef struct {
     /* --- Label-only entry ----------------------------------------------- */
     int     is_label;                       /* 1 = label def, 0 = instr    */
     char    label_name[UA_MAX_LABEL_LEN];  /* Label text (if is_label)    */
+
+    /* --- Function definition -------------------------------------------- */
+    int     is_function;                    /* 1 = func def with params    */
+    int     param_count;                    /* Number of parameters        */
+    char    param_names[MAX_FUNC_PARAMS][UA_MAX_LABEL_LEN];
 
     /* --- Instruction data ----------------------------------------------- */
     Opcode  opcode;                         /* Which operation             */

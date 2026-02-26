@@ -78,7 +78,7 @@ static void backend_error(const Instruction *inst, const char *msg)
 static void validate_register(const Instruction *inst, int reg)
 {
     if (reg < 0 || reg > 7) {
-        char msg[128];
+        char msg[256];
         snprintf(msg, sizeof(msg),
                  "register R%d is not available on the 8051 "
                  "(only R0-R7 supported)", reg);
@@ -89,13 +89,39 @@ static void validate_register(const Instruction *inst, int reg)
 static void validate_imm8(const Instruction *inst, int64_t val)
 {
     if (val < -128 || val > 255) {
-        char msg[128];
+        char msg[256];
         snprintf(msg, sizeof(msg),
                  "immediate value %lld out of 8-bit range (-128..255)",
                  (long long)val);
         backend_error(inst, msg);
     }
 }
+
+/* =========================================================================
+ *  8051 Variable Table — variables map to internal RAM direct addresses
+ *
+ *  8051 internal RAM layout (bank 0):
+ *    0x00-0x07  Register bank 0 (R0-R7)
+ *    0x08-0x7F  General purpose (bit-addressable 0x20-0x2F)
+ *    0x80-0xFF  SFR space (not usable for variables)
+ *
+ *  We allocate variables starting at 0x08, one byte each.
+ * ========================================================================= */
+#define I8051_VAR_BASE    0x08   /* first usable direct address             */
+#define I8051_VAR_LIMIT   0x80   /* exclusive upper bound                   */
+#define I8051_MAX_VARS    ((I8051_VAR_LIMIT) - (I8051_VAR_BASE))  /* 120    */
+
+typedef struct {
+    char    name[UA_MAX_LABEL_LEN];
+    uint8_t address;           /* direct address in internal RAM            */
+    int64_t init_value;        /* initial value (0 if unspecified)          */
+    int     has_init;          /* 1 if an initialiser was supplied          */
+} I8051VarEntry;
+
+typedef struct {
+    I8051VarEntry vars[I8051_MAX_VARS];
+    int           count;
+} I8051VarTable;
 
 /* =========================================================================
  *  CodeBuffer alias  —  local shorthand so existing emit() calls still work
@@ -300,6 +326,23 @@ static int instruction_size_8051(const Instruction *inst)
         case OP_INT:   /* LCALL vector_addr  (polyfill) */
             return 3;
 
+        case OP_VAR:
+            /* Declaration only — 0 bytes unless init value supplied */
+            if (inst->operand_count > 1 &&
+                inst->operands[1].type == OPERAND_IMMEDIATE) {
+                return 3;   /* MOV direct, #imm  (0x75, addr, imm) */
+            }
+            return 0;
+
+        case OP_SET:
+            if (inst->operands[1].type == OPERAND_REGISTER)
+                return 2;   /* MOV direct, Rn    (0x88+n, addr) */
+            else
+                return 3;   /* MOV direct, #imm  (0x75, addr, imm) */
+
+        case OP_GET:
+            return 2;       /* MOV Rn, direct    (0xA8+n, addr) */
+
         default:
             (void)rd; (void)rs; (void)imm;
             backend_error(inst, "unsupported opcode for 8051 backend");
@@ -311,9 +354,10 @@ static int instruction_size_8051(const Instruction *inst)
  *  Pass 1:  Build symbol table
  * ========================================================================= */
 static int pass1_build_symbols(const Instruction *ir, int ir_count,
-                               SymbolTable *st)
+                               SymbolTable *st, I8051VarTable *vtab)
 {
     symtab_init(st);
+    vtab->count = 0;
     int pc = 0;    /* program counter (byte offset) */
 
     for (int i = 0; i < ir_count; i++) {
@@ -322,12 +366,45 @@ static int pass1_build_symbols(const Instruction *ir, int ir_count,
         if (inst->is_label) {
             /* Check for duplicate */
             if (symtab_lookup(st, inst->label_name) >= 0) {
-                char msg[128];
+                char msg[256];
                 snprintf(msg, sizeof(msg),
                          "duplicate label '%s'", inst->label_name);
                 backend_error(inst, msg);
             }
             symtab_add(st, inst->label_name, pc);
+        } else if (inst->opcode == OP_VAR) {
+            /* Allocate a direct-address slot in internal RAM */
+            const char *vname = inst->operands[0].data.label;
+            if (vtab->count >= I8051_MAX_VARS) {
+                backend_error(inst,
+                              "too many variables (8051 internal RAM full)");
+            }
+            if (symtab_lookup(st, vname) >= 0) {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                         "duplicate variable '%s'", vname);
+                backend_error(inst, msg);
+            }
+            int addr = I8051_VAR_BASE + vtab->count;
+            I8051VarEntry *v = &vtab->vars[vtab->count];
+            strncpy(v->name, vname, UA_MAX_LABEL_LEN - 1);
+            v->name[UA_MAX_LABEL_LEN - 1] = '\0';
+            v->address = (uint8_t)addr;
+            if (inst->operand_count > 1 &&
+                inst->operands[1].type == OPERAND_IMMEDIATE) {
+                v->has_init   = 1;
+                v->init_value = inst->operands[1].data.imm;
+            } else {
+                v->has_init   = 0;
+                v->init_value = 0;
+            }
+            vtab->count++;
+
+            /* Register variable name in symbol table so SET/GET can find it.
+             * The "address" here is the direct RAM address (not a PC offset). */
+            symtab_add(st, vname, addr);
+
+            pc += instruction_size_8051(inst);
         } else {
             pc += instruction_size_8051(inst);
         }
@@ -709,7 +786,7 @@ static void pass2_emit_code(const Instruction *ir, int ir_count,
         case OP_JMP:
             target_addr = symtab_lookup(st, inst->operands[0].data.label);
             if (target_addr < 0) {
-                char msg[128];
+                char msg[256];
                 snprintf(msg, sizeof(msg),
                          "undefined label '%s'",
                          inst->operands[0].data.label);
@@ -724,7 +801,7 @@ static void pass2_emit_code(const Instruction *ir, int ir_count,
         case OP_JZ:
             target_addr = symtab_lookup(st, inst->operands[0].data.label);
             if (target_addr < 0) {
-                char msg[128];
+                char msg[256];
                 snprintf(msg, sizeof(msg),
                          "undefined label '%s'",
                          inst->operands[0].data.label);
@@ -746,7 +823,7 @@ static void pass2_emit_code(const Instruction *ir, int ir_count,
         case OP_JNZ:
             target_addr = symtab_lookup(st, inst->operands[0].data.label);
             if (target_addr < 0) {
-                char msg[128];
+                char msg[256];
                 snprintf(msg, sizeof(msg),
                          "undefined label '%s'",
                          inst->operands[0].data.label);
@@ -768,7 +845,7 @@ static void pass2_emit_code(const Instruction *ir, int ir_count,
         case OP_CALL:
             target_addr = symtab_lookup(st, inst->operands[0].data.label);
             if (target_addr < 0) {
-                char msg[128];
+                char msg[256];
                 snprintf(msg, sizeof(msg),
                          "undefined label '%s'",
                          inst->operands[0].data.label);
@@ -912,6 +989,79 @@ static void pass2_emit_code(const Instruction *ir, int ir_count,
             break;
         }
 
+        /* ----------------------------------------------------------------
+         *  VAR name [, #imm]  —  allocate direct-address variable
+         *  If an initialiser is present: MOV direct, #imm  (3 bytes)
+         *  Otherwise: no bytes emitted.
+         * ---------------------------------------------------------------- */
+        case OP_VAR: {
+            const char *vname = inst->operands[0].data.label;
+            int addr = symtab_lookup(st, vname);
+            if (addr < 0) {
+                backend_error(inst, "internal: VAR address not found");
+            }
+            if (inst->operand_count > 1 &&
+                inst->operands[1].type == OPERAND_IMMEDIATE) {
+                int64_t val = inst->operands[1].data.imm;
+                validate_imm8(inst, val);
+                /* MOV direct, #data : 0x75, direct, data */
+                emit(buf, 0x75);
+                emit(buf, (uint8_t)addr);
+                emit(buf, (uint8_t)(val & 0xFF));
+            }
+            break;
+        }
+
+        /* ----------------------------------------------------------------
+         *  SET name, Rs    ->  MOV direct, Rn  [0x88+n, addr]  2 bytes
+         *  SET name, #imm  ->  MOV direct,#imm [0x75, addr, imm] 3 bytes
+         * ---------------------------------------------------------------- */
+        case OP_SET: {
+            const char *vname = inst->operands[0].data.label;
+            int addr = symtab_lookup(st, vname);
+            if (addr < 0) {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                         "undefined variable '%s'", vname);
+                backend_error(inst, msg);
+            }
+            if (inst->operands[1].type == OPERAND_REGISTER) {
+                rs = inst->operands[1].data.reg;
+                validate_register(inst, rs);
+                /* MOV direct, Rn : 0x88+n, direct */
+                emit(buf, (uint8_t)(0x88 + rs));
+                emit(buf, (uint8_t)addr);
+            } else {
+                imm = inst->operands[1].data.imm;
+                validate_imm8(inst, imm);
+                /* MOV direct, #data : 0x75, direct, data */
+                emit(buf, 0x75);
+                emit(buf, (uint8_t)addr);
+                emit(buf, (uint8_t)(imm & 0xFF));
+            }
+            break;
+        }
+
+        /* ----------------------------------------------------------------
+         *  GET Rd, name  ->  MOV Rn, direct  [0xA8+n, addr]   2 bytes
+         * ---------------------------------------------------------------- */
+        case OP_GET: {
+            rd = inst->operands[0].data.reg;
+            const char *vname = inst->operands[1].data.label;
+            validate_register(inst, rd);
+            int addr = symtab_lookup(st, vname);
+            if (addr < 0) {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                         "undefined variable '%s'", vname);
+                backend_error(inst, msg);
+            }
+            /* MOV Rn, direct : 0xA8+n, direct */
+            emit(buf, (uint8_t)(0xA8 + rd));
+            emit(buf, (uint8_t)addr);
+            break;
+        }
+
         default:
             backend_error(inst, "unsupported opcode for 8051 backend");
             break;
@@ -928,9 +1078,10 @@ CodeBuffer* generate_8051(const Instruction *ir, int ir_count)
 {
     fprintf(stderr, "[8051] Pass 1: address resolution ...\n");
 
-    /* --- Pass 1: symbol table ------------------------------------------ */
-    SymbolTable symtab;
-    int total_size = pass1_build_symbols(ir, ir_count, &symtab);
+    /* --- Pass 1: symbol table + variable table ------------------------- */
+    SymbolTable    symtab;
+    I8051VarTable  vtab;
+    int total_size = pass1_build_symbols(ir, ir_count, &symtab, &vtab);
 
     fprintf(stderr, "[8051] Symbol table (%d entries):\n", symtab.count);
     for (int i = 0; i < symtab.count; i++) {
@@ -938,6 +1089,18 @@ CodeBuffer* generate_8051(const Instruction *ir, int ir_count)
                 symtab.entries[i].name,
                 symtab.entries[i].address,
                 symtab.entries[i].address);
+    }
+    if (vtab.count > 0) {
+        fprintf(stderr, "[8051] Variables (%d, direct RAM 0x%02X-0x%02X):\n",
+                vtab.count, I8051_VAR_BASE,
+                I8051_VAR_BASE + vtab.count - 1);
+        for (int v = 0; v < vtab.count; v++) {
+            fprintf(stderr, "  %-20s @ 0x%02X", vtab.vars[v].name,
+                    vtab.vars[v].address);
+            if (vtab.vars[v].has_init)
+                fprintf(stderr, " = %d", (int)vtab.vars[v].init_value);
+            fprintf(stderr, "\n");
+        }
     }
     fprintf(stderr, "[8051] Estimated code size: %d bytes\n", total_size);
 

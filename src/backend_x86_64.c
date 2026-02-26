@@ -493,8 +493,69 @@ static int instruction_size_x64(const Instruction *inst)
         case OP_NOP:    return 1;
         case OP_HLT:    return 1;   /* -> RET */
         case OP_INT:    return 2;   /* CD ib */
+
+        /* ---- Variable pseudo-instructions ----------------------------- */
+        case OP_VAR:    return 0;   /* declaration only, no code emitted  */
+        case OP_SET:
+            /* SET name, Rs  →  MOV [RIP+disp32], r64  (7 bytes)
+             * SET name, imm →  MOV qword [RIP+disp32], imm32 (11 bytes) */
+            if (inst->operands[1].type == OPERAND_REGISTER) return 7;
+            return 11;
+        case OP_GET:
+            /* GET Rd, name  →  MOV r64, [RIP+disp32]  (7 bytes) */
+            return 7;
         default:        return 0;
     }
+}
+
+/* =========================================================================
+ *  Variable table — compiler-managed named storage
+ *
+ *  Variables declared with VAR are allocated at the end of the code
+ *  segment (8 bytes each for x86-64).  Their addresses are registered
+ *  as symbols so that SET/GET can use the fixup mechanism for
+ *  RIP-relative addressing.
+ * ========================================================================= */
+#define X64_MAX_VARS     256
+#define X64_VAR_SIZE     8      /* bytes per variable (qword) */
+
+typedef struct {
+    char    name[UA_MAX_LABEL_LEN];
+    int64_t init_value;
+    int     has_init;
+} X64VarEntry;
+
+typedef struct {
+    X64VarEntry vars[X64_MAX_VARS];
+    int         count;
+} X64VarTable;
+
+static void x64_vartab_init(X64VarTable *vt)
+{
+    vt->count = 0;
+}
+
+static int x64_vartab_add(X64VarTable *vt, const char *name,
+                           int64_t init_value, int has_init)
+{
+    /* Check for duplicate */
+    for (int i = 0; i < vt->count; i++) {
+        if (strcmp(vt->vars[i].name, name) == 0) {
+            fprintf(stderr, "x86-64: duplicate variable '%s'\n", name);
+            return -1;
+        }
+    }
+    if (vt->count >= X64_MAX_VARS) {
+        fprintf(stderr, "x86-64: variable table overflow (max %d)\n",
+                X64_MAX_VARS);
+        return -1;
+    }
+    X64VarEntry *v = &vt->vars[vt->count++];
+    strncpy(v->name, name, UA_MAX_LABEL_LEN - 1);
+    v->name[UA_MAX_LABEL_LEN - 1] = '\0';
+    v->init_value = init_value;
+    v->has_init   = has_init;
+    return 0;
 }
 
 /* =========================================================================
@@ -505,18 +566,39 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count)
     fprintf(stderr, "[x86-64] Generating code for %d IR instructions ...\n",
             ir_count);
 
-    /* --- Pass 1: collect label addresses ------------------------------- */
+    /* --- Pass 1: collect label addresses + variable declarations ------- */
     X64SymTab symtab;
     x64_symtab_init(&symtab);
+
+    X64VarTable vartab;
+    x64_vartab_init(&vartab);
 
     int pc = 0;
     for (int i = 0; i < ir_count; i++) {
         const Instruction *inst = &ir[i];
         if (inst->is_label) {
             x64_symtab_add(&symtab, inst->label_name, pc);
+        } else if (inst->opcode == OP_VAR) {
+            /* Collect variable declaration — no code emitted */
+            const char *vname = inst->operands[0].data.label;
+            int64_t init_val  = 0;
+            int     has_init  = 0;
+            if (inst->operand_count >= 2 &&
+                inst->operands[1].type == OPERAND_IMMEDIATE) {
+                init_val = inst->operands[1].data.imm;
+                has_init = 1;
+            }
+            x64_vartab_add(&vartab, vname, init_val, has_init);
         } else {
             pc += instruction_size_x64(inst);
         }
+    }
+
+    /* Register variable symbols: each lives at code_end + index * 8 */
+    int var_base = pc;   /* total code size */
+    for (int v = 0; v < vartab.count; v++) {
+        x64_symtab_add(&symtab, vartab.vars[v].name,
+                        var_base + v * X64_VAR_SIZE);
     }
 
     /* --- Pass 2: code emission ----------------------------------------- */
@@ -937,6 +1019,67 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count)
             break;
         }
 
+        /* ---- VAR  — declaration only, no code emitted ----------------- */
+        case OP_VAR:
+            /* Already handled in pass 1 */
+            break;
+
+        /* ---- SET name, Rs/imm  →  MOV [RIP+disp32], r64/imm ---------- */
+        case OP_SET: {
+            const char *vname = inst->operands[0].data.label;
+            if (inst->operands[1].type == OPERAND_REGISTER) {
+                int rs = inst->operands[1].data.reg;
+                x64_validate_register(inst, rs);
+                fprintf(stderr, "  SET %s, R%d -> MOV [RIP+disp32], r64\n",
+                        vname, rs);
+                /* REX.W prefix (+ REX.R if reg >= 8) */
+                emit_byte(code, (uint8_t)(0x48 | ((rs >= 8) ? 0x04 : 0x00)));
+                emit_byte(code, 0x89);  /* MOV r/m64, r64 */
+                emit_byte(code, (uint8_t)(((rs & 7) << 3) | 0x05));  /* ModRM: mod=00 rm=101 (RIP-rel) */
+                int patch_off = code->size;
+                emit_rel32_placeholder(code);
+                x64_add_fixup(&symtab, vname, patch_off, code->size,
+                              inst->line);
+            } else {
+                /* Immediate: MOV qword [RIP+disp32], imm32 */
+                int32_t imm = (int32_t)inst->operands[1].data.imm;
+                fprintf(stderr, "  SET %s, #%d -> MOV [RIP+disp32], imm32\n",
+                        vname, imm);
+                emit_byte(code, 0x48);  /* REX.W */
+                emit_byte(code, 0xC7);  /* MOV r/m64, imm32 */
+                emit_byte(code, 0x05);  /* ModRM: mod=00 reg=000 rm=101 */
+                int patch_off = code->size;
+                emit_rel32_placeholder(code);
+                /* imm32 */
+                emit_byte(code, (uint8_t)( imm        & 0xFF));
+                emit_byte(code, (uint8_t)((imm >>  8) & 0xFF));
+                emit_byte(code, (uint8_t)((imm >> 16) & 0xFF));
+                emit_byte(code, (uint8_t)((imm >> 24) & 0xFF));
+                x64_add_fixup(&symtab, vname, patch_off,
+                              code->size,  /* instr_end = end of full instruction */
+                              inst->line);
+            }
+            break;
+        }
+
+        /* ---- GET Rd, name  →  MOV r64, [RIP+disp32] ------------------ */
+        case OP_GET: {
+            int rd = inst->operands[0].data.reg;
+            const char *vname = inst->operands[1].data.label;
+            x64_validate_register(inst, rd);
+            fprintf(stderr, "  GET R%d, %s -> MOV r64, [RIP+disp32]\n",
+                    rd, vname);
+            /* REX.W prefix (+ REX.R if reg >= 8) */
+            emit_byte(code, (uint8_t)(0x48 | ((rd >= 8) ? 0x04 : 0x00)));
+            emit_byte(code, 0x8B);  /* MOV r64, r/m64 */
+            emit_byte(code, (uint8_t)(((rd & 7) << 3) | 0x05));  /* ModRM */
+            int patch_off = code->size;
+            emit_rel32_placeholder(code);
+            x64_add_fixup(&symtab, vname, patch_off, code->size,
+                          inst->line);
+            break;
+        }
+
         default: {
             char msg[128];
             snprintf(msg, sizeof(msg),
@@ -953,8 +1096,8 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count)
         X64Fixup *fix = &symtab.fixups[f];
         int target = x64_symtab_lookup(&symtab, fix->label);
         if (target < 0) {
-            fprintf(stderr, "x86-64: undefined label '%s' (line %d)\n",
-                    fix->label, fix->line);
+            fprintf(stderr, "x86-64: undefined label or variable '%s' "
+                    "(line %d)\n", fix->label, fix->line);
             free_code_buffer(code);
             return NULL;
         }
@@ -962,6 +1105,16 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count)
         patch_rel32(code, fix->patch_offset, rel);
     }
 
-    fprintf(stderr, "[x86-64] Emitted %d bytes\n", code->size);
+    /* --- Append variable data section ---------------------------------- */
+    for (int v = 0; v < vartab.count; v++) {
+        int64_t val = vartab.vars[v].has_init ? vartab.vars[v].init_value : 0;
+        /* Emit 8 bytes (little-endian qword) */
+        for (int b = 0; b < X64_VAR_SIZE; b++) {
+            emit_byte(code, (uint8_t)((val >> (b * 8)) & 0xFF));
+        }
+    }
+
+    fprintf(stderr, "[x86-64] Emitted %d bytes (%d code + %d data)\n",
+            code->size, var_base, vartab.count * X64_VAR_SIZE);
     return code;
 }

@@ -10,9 +10,11 @@ This document is the complete reference for the **Unified Assembly (UA)** instru
 2. [Precompiler Directives](#precompiler-directives)
 3. [Comments](#comments)
 4. [Labels](#labels)
-4. [Registers](#registers)
-5. [Numeric Literals](#numeric-literals)
-6. [Instruction Set](#instruction-set)
+5. [Variables](#variables)
+6. [Functions](#functions)
+7. [Registers](#registers)
+8. [Numeric Literals](#numeric-literals)
+9. [Instruction Set](#instruction-set)
    - [Data Movement](#data-movement)
    - [Arithmetic](#arithmetic)
    - [Bitwise Logic](#bitwise-logic)
@@ -21,8 +23,9 @@ This document is the complete reference for the **Unified Assembly (UA)** instru
    - [Control Flow](#control-flow)
    - [Stack Operations](#stack-operations)
    - [System](#system)
-7. [Operand Rules](#operand-rules)
-8. [Backend-Specific Notes](#backend-specific-notes)
+   - [Variables](#variable-instructions)
+10. [Operand Rules](#operand-rules)
+11. [Backend-Specific Notes](#backend-specific-notes)
 
 ---
 
@@ -95,6 +98,23 @@ Conditional blocks can be **nested** (up to 64 levels):
 - Imported files are preprocessed recursively (their directives are evaluated)
 - Import nesting is limited to 16 levels
 
+#### Namespace Prefixing
+
+All labels, function definitions, and variable declarations in an imported file are automatically prefixed with the filename (without extension and path):
+
+```asm
+; main.ua
+@IMPORT "lib/math.ua"
+
+    CALL math.add_values     ; calls add_values defined in math.ua
+    GET  R0, math.result     ; accesses variable 'result' from math.ua
+    math.double_it()         ; syntactic sugar for CALL math.double_it
+```
+
+The prefix is derived from the filename: `lib/math.ua` → `math`, `helpers.ua` → `helpers`.
+
+This prevents name collisions when importing multiple files and provides clear provenance for every symbol.
+
 ### Stub Markers
 
 ```asm
@@ -135,12 +155,133 @@ loop:
 
 **Rules:**
 
-- Labels consist of letters (`a-z`, `A-Z`), digits (`0-9`), and underscores (`_`)
+- Labels consist of letters (`a-z`, `A-Z`), digits (`0-9`), underscores (`_`), and dots (`.`)
 - Labels must start with a letter or underscore
-- Maximum length: 64 characters
+- Maximum length: 128 characters
 - Labels are **case-sensitive**
 - Duplicate labels within a file are an error
 - Forward references are supported (two-pass assembly)
+- Dots are used for namespace-qualified names (e.g., `math.start`)
+
+---
+
+## Variables
+
+Variables are compiler-managed named storage locations. Unlike registers, variables persist across function calls and can be accessed from anywhere in the program.
+
+### Declaring Variables
+
+```asm
+    VAR  counter             ; declare variable, initialized to 0
+    VAR  result, 42          ; declare variable with initial value
+```
+
+### Writing to Variables
+
+```asm
+    SET  counter, R0         ; store register value into variable
+    SET  result, 99          ; store immediate value into variable
+```
+
+### Reading from Variables
+
+```asm
+    GET  R0, counter         ; load variable value into register
+    GET  R1, result
+```
+
+### Storage Model
+
+Variables are stored differently depending on the target architecture:
+
+| Backend | Storage | Size | Address Range |
+|---------|---------|------|---------------|
+| x86-64 | Data section after code | 8 bytes | RIP-relative addressing |
+| x86-32 | Data section after code | 4 bytes | Absolute addressing |
+| ARM | Data section after code | 4 bytes | MOVW/MOVT + LDR/STR via r12 |
+| 8051 | Internal RAM (direct) | 1 byte | 0x08–0x7F |
+
+**Rules:**
+
+- Maximum 256 variables per program (120 for 8051 due to RAM limits)
+- Variable names follow the same rules as labels
+- Variables must be declared before use with `SET` or `GET`
+- `VAR` declarations with an initial value emit initialization code at the declaration point
+- On 8051, immediate values in `SET` are limited to 8 bits (0–255)
+
+### Example: Using Variables
+
+```asm
+    VAR  x, 10
+    VAR  y, 20
+
+    GET  R0, x           ; R0 = 10
+    GET  R1, y           ; R1 = 20
+    ADD  R0, R1          ; R0 = 30
+    SET  x, R0           ; x = 30
+    HLT
+```
+
+---
+
+## Functions
+
+Functions are labels with declared parameter names. The parameter list documents which variables the function expects to be available.
+
+### Defining Functions
+
+```asm
+my_function(arg1, arg2):
+    GET  R0, arg1
+    GET  R1, arg2
+    ADD  R0, R1
+    RET
+```
+
+Both syntaxes are equivalent:
+```asm
+my_func:          ; plain label (no documented parameters)
+my_func(a, b):    ; function definition (parameters a, b documented)
+```
+
+### Calling Functions
+
+Functions can be called with `CALL` or using syntactic sugar:
+
+```asm
+    CALL my_function         ; standard call
+    my_function()            ; syntactic sugar — equivalent to CALL my_function
+    CALL my_function(R0, R1) ; call with argument annotations
+```
+
+### Rules
+
+- Maximum 8 parameters per function definition
+- Parameters must be declared as variables (using `VAR`) before the function is called
+- Function definitions are labels — they follow all label rules
+- The parameter list is metadata for documentation and validation; the actual argument passing uses `SET`/`GET` on the named variables
+
+### Complete Example
+
+```asm
+    JMP  main
+
+    VAR  a
+    VAR  b
+
+add(a, b):
+    GET  R0, a
+    GET  R1, b
+    ADD  R0, R1
+    RET
+
+main:
+    SET  a, 15
+    SET  b, 27
+    CALL add
+    ; R0 now contains 42
+    HLT
+```
 
 ---
 
@@ -250,7 +391,7 @@ Immediate values are prefixed with `#` in the instruction:
 
 ## Instruction Set
 
-UA defines 27 instructions organized into seven categories. This is the **Minimum Viable Instruction Set (MVIS)**.
+UA defines 30 instructions organized into eight categories. This is the **Minimum Viable Instruction Set (MVIS)**.
 
 ### Data Movement
 
@@ -419,6 +560,36 @@ my_function:
 >
 > **8051 Note:** `HLT` generates an infinite loop (`SJMP $`, opcode `80 FE`). `INT #n` generates `LCALL` to the interrupt vector address `(n × 8) + 3`.
 
+### Variable Instructions
+
+| Mnemonic | Syntax | Description |
+|----------|--------|-------------|
+| `VAR` | `VAR name` or `VAR name, #imm` | Declare a named variable (optional initializer) |
+| `SET` | `SET name, Rs` or `SET name, #imm` | Store a register or immediate into a variable |
+| `GET` | `GET Rd, name` | Load a variable's value into a register |
+
+**Examples:**
+
+```asm
+    VAR  counter, 0          ; declare with initial value
+    VAR  flags               ; declare (default 0)
+
+    LDI  R0, 42
+    SET  counter, R0         ; counter = 42
+    SET  flags, 0xFF         ; flags = 0xFF
+
+    GET  R1, counter         ; R1 = 42
+    GET  R2, flags           ; R2 = 0xFF
+```
+
+> **x86-64 Note:** Variables are stored as 8-byte values in a data section appended after code. `SET`/`GET` use RIP-relative MOV instructions with 32-bit displacement.
+>
+> **x86-32 Note:** Variables are 4-byte values accessed via absolute `[disp32]` addressing.
+>
+> **ARM Note:** Variables are 4-byte values. The compiler loads the variable address into r12 (scratch) using MOVW+MOVT, then uses LDR/STR for the actual access. For `SET` with an immediate, r11 is also used as a scratch register.
+>
+> **8051 Note:** Variables occupy one byte each in internal RAM (direct addresses 0x08–0x7F). `SET`/`GET` use direct-addressing MOV instructions. Maximum 120 variables.
+
 ---
 
 ## Operand Rules
@@ -446,6 +617,9 @@ Each instruction has a fixed **operand shape** enforced at parse time:
 | JMP, JZ, JNZ, CALL | label |
 | INT | imm |
 | NOP, HLT, RET | *(none)* |
+| VAR | name [, imm] |
+| SET | name, reg_or_imm |
+| GET | reg, name |
 
 Incorrect operand shapes produce a compile-time error with the source line number.
 

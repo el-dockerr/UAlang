@@ -40,6 +40,8 @@ typedef enum {
     /* --- Punctuation ---------------------------------------------------- */
     TOKEN_COMMA,        /* ','  operand separator                            */
     TOKEN_COLON,        /* ':'  label terminator (consumed during labeling)  */
+    TOKEN_LPAREN,       /* '('  function parameter / argument list open      */
+    TOKEN_RPAREN,       /* ')'  function parameter / argument list close     */
     TOKEN_NEWLINE,      /* '\n' statement terminator                         */
 
     /* --- Meta ----------------------------------------------------------- */
@@ -57,7 +59,7 @@ typedef enum {
  *   - its numeric value (meaningful only for TOKEN_NUMBER / TOKEN_REGISTER)
  *   - source location for error reporting
  * ------------------------------------------------------------------------- */
-#define UA_MAX_TOKEN_LEN  64   /* Maximum characters in a single lexeme */
+#define UA_MAX_TOKEN_LEN  128  /* Maximum characters in a single lexeme */
 
 typedef struct {
     UaTokenType type;

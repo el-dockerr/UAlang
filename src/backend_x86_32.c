@@ -474,8 +474,60 @@ static int instruction_size_x32(const Instruction *inst)
         case OP_NOP:    return 1;
         case OP_HLT:    return 1;   /* -> RET */
         case OP_INT:    return 2;   /* CD ib */
+
+        /* ---- Variable pseudo-instructions ----------------------------- */
+        case OP_VAR:    return 0;   /* declaration only */
+        case OP_SET:
+            /* SET name, Rs  ->  MOV [disp32], r32  (6 bytes)
+             * SET name, imm ->  MOV [disp32], imm32 (10 bytes) */
+            if (inst->operands[1].type == OPERAND_REGISTER) return 6;
+            return 10;
+        case OP_GET:
+            /* GET Rd, name  ->  MOV r32, [disp32]  (6 bytes) */
+            return 6;
         default:        return 0;
     }
+}
+
+/* =========================================================================
+ *  Variable table for x86-32
+ * ========================================================================= */
+#define X32_MAX_VARS   256
+#define X32_VAR_SIZE   4      /* bytes per variable (dword) */
+
+typedef struct {
+    char    name[UA_MAX_LABEL_LEN];
+    int32_t init_value;
+    int     has_init;
+} X32VarEntry;
+
+typedef struct {
+    X32VarEntry vars[X32_MAX_VARS];
+    int         count;
+} X32VarTable;
+
+static void x32_vartab_init(X32VarTable *vt) { vt->count = 0; }
+
+static int x32_vartab_add(X32VarTable *vt, const char *name,
+                          int32_t init_value, int has_init)
+{
+    for (int i = 0; i < vt->count; i++) {
+        if (strcmp(vt->vars[i].name, name) == 0) {
+            fprintf(stderr, "x86-32: duplicate variable '%s'\n", name);
+            return -1;
+        }
+    }
+    if (vt->count >= X32_MAX_VARS) {
+        fprintf(stderr, "x86-32: variable table overflow (max %d)\n",
+                X32_MAX_VARS);
+        return -1;
+    }
+    X32VarEntry *v = &vt->vars[vt->count++];
+    strncpy(v->name, name, UA_MAX_LABEL_LEN - 1);
+    v->name[UA_MAX_LABEL_LEN - 1] = '\0';
+    v->init_value = init_value;
+    v->has_init   = has_init;
+    return 0;
 }
 
 /* =========================================================================
@@ -486,18 +538,38 @@ CodeBuffer* generate_x86_32(const Instruction *ir, int ir_count)
     fprintf(stderr, "[x86-32] Generating code for %d IR instructions ...\n",
             ir_count);
 
-    /* --- Pass 1: collect label addresses ------------------------------- */
+    /* --- Pass 1: collect label addresses + variable declarations ------- */
     X32SymTab symtab;
     x32_symtab_init(&symtab);
+
+    X32VarTable vartab;
+    x32_vartab_init(&vartab);
 
     int pc = 0;
     for (int i = 0; i < ir_count; i++) {
         const Instruction *inst = &ir[i];
         if (inst->is_label) {
             x32_symtab_add(&symtab, inst->label_name, pc);
+        } else if (inst->opcode == OP_VAR) {
+            const char *vname = inst->operands[0].data.label;
+            int32_t init_val  = 0;
+            int     has_init  = 0;
+            if (inst->operand_count >= 2 &&
+                inst->operands[1].type == OPERAND_IMMEDIATE) {
+                init_val = (int32_t)inst->operands[1].data.imm;
+                has_init = 1;
+            }
+            x32_vartab_add(&vartab, vname, init_val, has_init);
         } else {
             pc += instruction_size_x32(inst);
         }
+    }
+
+    /* Register variable symbols: each at code_end + index * 4 */
+    int var_base = pc;
+    for (int v = 0; v < vartab.count; v++) {
+        x32_symtab_add(&symtab, vartab.vars[v].name,
+                        var_base + v * X32_VAR_SIZE);
     }
 
     /* --- Pass 2: code emission ----------------------------------------- */
@@ -916,6 +988,58 @@ CodeBuffer* generate_x86_32(const Instruction *ir, int ir_count)
             break;
         }
 
+        /* ---- VAR — declaration only, no code emitted ----------------- */
+        case OP_VAR:
+            break;
+
+        /* ---- SET name, Rs/imm → MOV [disp32], r32/imm32 -------------- */
+        case OP_SET: {
+            const char *vname = inst->operands[0].data.label;
+            if (inst->operands[1].type == OPERAND_REGISTER) {
+                int rs = inst->operands[1].data.reg;
+                x32_validate_register(inst, rs);
+                uint8_t enc = X32_REG_ENC[rs];
+                fprintf(stderr, "  SET %s, R%d -> MOV [disp32], %s\n",
+                        vname, rs, X32_REG_NAME[rs]);
+                emit_byte(code, 0x89);  /* MOV r/m32, r32 */
+                emit_byte(code, (uint8_t)((enc << 3) | 0x05));  /* ModRM: [disp32] */
+                int patch_off = code->size;
+                emit_rel32_placeholder(code);  /* disp32 placeholder */
+                /* For absolute addressing, instr_end=0 so patch = target */
+                x32_add_fixup(&symtab, vname, patch_off, 0, inst->line);
+            } else {
+                int32_t imm = (int32_t)inst->operands[1].data.imm;
+                fprintf(stderr, "  SET %s, #%d -> MOV [disp32], imm32\n",
+                        vname, imm);
+                emit_byte(code, 0xC7);  /* MOV r/m32, imm32 */
+                emit_byte(code, 0x05);  /* ModRM: [disp32], reg=000 */
+                int patch_off = code->size;
+                emit_rel32_placeholder(code);
+                emit_byte(code, (uint8_t)( imm        & 0xFF));
+                emit_byte(code, (uint8_t)((imm >>  8) & 0xFF));
+                emit_byte(code, (uint8_t)((imm >> 16) & 0xFF));
+                emit_byte(code, (uint8_t)((imm >> 24) & 0xFF));
+                x32_add_fixup(&symtab, vname, patch_off, 0, inst->line);
+            }
+            break;
+        }
+
+        /* ---- GET Rd, name → MOV r32, [disp32] ------------------------- */
+        case OP_GET: {
+            int rd = inst->operands[0].data.reg;
+            const char *vname = inst->operands[1].data.label;
+            x32_validate_register(inst, rd);
+            uint8_t enc = X32_REG_ENC[rd];
+            fprintf(stderr, "  GET R%d, %s -> MOV %s, [disp32]\n",
+                    rd, vname, X32_REG_NAME[rd]);
+            emit_byte(code, 0x8B);  /* MOV r32, r/m32 */
+            emit_byte(code, (uint8_t)((enc << 3) | 0x05));  /* ModRM: [disp32] */
+            int patch_off = code->size;
+            emit_rel32_placeholder(code);
+            x32_add_fixup(&symtab, vname, patch_off, 0, inst->line);
+            break;
+        }
+
         default: {
             char msg[128];
             snprintf(msg, sizeof(msg),
@@ -932,8 +1056,8 @@ CodeBuffer* generate_x86_32(const Instruction *ir, int ir_count)
         X32Fixup *fix = &symtab.fixups[f];
         int target = x32_symtab_lookup(&symtab, fix->label);
         if (target < 0) {
-            fprintf(stderr, "x86-32: undefined label '%s' (line %d)\n",
-                    fix->label, fix->line);
+            fprintf(stderr, "x86-32: undefined label or variable '%s' "
+                    "(line %d)\n", fix->label, fix->line);
             free_code_buffer(code);
             return NULL;
         }
@@ -941,6 +1065,16 @@ CodeBuffer* generate_x86_32(const Instruction *ir, int ir_count)
         patch_rel32(code, fix->patch_offset, rel);
     }
 
-    fprintf(stderr, "[x86-32] Emitted %d bytes\n", code->size);
+    /* --- Append variable data section ---------------------------------- */
+    for (int v = 0; v < vartab.count; v++) {
+        int32_t val = vartab.vars[v].has_init ? vartab.vars[v].init_value : 0;
+        emit_byte(code, (uint8_t)( val        & 0xFF));
+        emit_byte(code, (uint8_t)((val >>  8) & 0xFF));
+        emit_byte(code, (uint8_t)((val >> 16) & 0xFF));
+        emit_byte(code, (uint8_t)((val >> 24) & 0xFF));
+    }
+
+    fprintf(stderr, "[x86-32] Emitted %d bytes (%d code + %d data)\n",
+            code->size, var_base, vartab.count * X32_VAR_SIZE);
     return code;
 }

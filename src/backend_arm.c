@@ -59,8 +59,10 @@
  *  R0-R7 map directly.  R8-R15 rejected (R13=SP, R14=LR, R15=PC).
  * ========================================================================= */
 #define ARM_MAX_REG  8
-#define ARM_REG_LR   14
+#define ARM_REG_FP   11    /* r11 — used as scratch for SET imm  */
+#define ARM_REG_IP   12    /* r12 — intra-procedure scratch register */
 #define ARM_REG_SP   13
+#define ARM_REG_LR   14
 
 static const uint8_t ARM_REG_ENC[ARM_MAX_REG] = {
     0, 1, 2, 3, 4, 5, 6, 7
@@ -94,7 +96,7 @@ static void arm_error(const Instruction *inst, const char *msg)
 static void arm_validate_register(const Instruction *inst, int reg)
 {
     if (reg < 0 || reg >= ARM_MAX_REG) {
-        char msg[128];
+        char msg[256];
         snprintf(msg, sizeof(msg),
                  "register R%d is not mapped in the ARM backend "
                  "(supports R0-R7: r0-r7)",
@@ -255,6 +257,15 @@ static void emit_arm_load_imm32(CodeBuffer *buf, uint8_t rd, int32_t imm)
     if ((val >> 16) != 0) {
         emit_arm_movt(buf, rd, (uint16_t)((val >> 16) & 0xFFFF));
     }
+}
+
+/* Always emit both MOVW + MOVT (8 bytes) — used for variable addresses
+ * where a fixed instruction size is needed for pass-1 sizing. */
+static void emit_arm_load_imm32_full(CodeBuffer *buf, uint8_t rd, int32_t imm)
+{
+    uint32_t val = (uint32_t)imm;
+    emit_arm_movw(buf, rd, (uint16_t)(val & 0xFFFF));
+    emit_arm_movt(buf, rd, (uint16_t)((val >> 16) & 0xFFFF));
 }
 
 /* --- ADD Rd, Rn, Rm ---------------------------------------------------- */
@@ -720,6 +731,18 @@ static int instruction_size_arm(const Instruction *inst)
         case OP_NOP:    return 4;
         case OP_HLT:    return 4;   /* BX LR */
         case OP_INT:    return 4;   /* SVC */
+
+        /* ---- Variable pseudo-instructions ----------------------------- */
+        case OP_VAR:    return 0;   /* declaration only */
+        case OP_SET:
+            /* SET name, Rs  -> MOVW+MOVT r12,addr + STR Rs,[r12] (12) */
+            if (inst->operands[1].type == OPERAND_REGISTER) return 12;
+            /* SET name, imm -> MOVW+MOVT r11,imm + MOVW+MOVT r12,addr
+             *                + STR r11,[r12]  (20) */
+            return 20;
+        case OP_GET:
+            /* GET Rd, name  -> MOVW+MOVT r12,addr + LDR Rd,[r12]  (12) */
+            return 12;
         default:        return 0;
     }
 }
@@ -741,6 +764,47 @@ static uint8_t arm_scratch_reg(uint8_t rd)
 }
 
 /* =========================================================================
+ *  Variable table for ARM
+ * ========================================================================= */
+#define ARM_MAX_VARS   256
+#define ARM_VAR_SIZE   4      /* bytes per variable (word) */
+
+typedef struct {
+    char    name[UA_MAX_LABEL_LEN];
+    int32_t init_value;
+    int     has_init;
+} ARMVarEntry;
+
+typedef struct {
+    ARMVarEntry vars[ARM_MAX_VARS];
+    int         count;
+} ARMVarTable;
+
+static void arm_vartab_init(ARMVarTable *vt) { vt->count = 0; }
+
+static int arm_vartab_add(ARMVarTable *vt, const char *name,
+                          int32_t init_value, int has_init)
+{
+    for (int i = 0; i < vt->count; i++) {
+        if (strcmp(vt->vars[i].name, name) == 0) {
+            fprintf(stderr, "ARM: duplicate variable '%s'\n", name);
+            return -1;
+        }
+    }
+    if (vt->count >= ARM_MAX_VARS) {
+        fprintf(stderr, "ARM: variable table overflow (max %d)\n",
+                ARM_MAX_VARS);
+        return -1;
+    }
+    ARMVarEntry *v = &vt->vars[vt->count++];
+    strncpy(v->name, name, UA_MAX_LABEL_LEN - 1);
+    v->name[UA_MAX_LABEL_LEN - 1] = '\0';
+    v->init_value = init_value;
+    v->has_init   = has_init;
+    return 0;
+}
+
+/* =========================================================================
  *  generate_arm()  —  main entry point  (two-pass)
  * ========================================================================= */
 CodeBuffer* generate_arm(const Instruction *ir, int ir_count)
@@ -748,18 +812,38 @@ CodeBuffer* generate_arm(const Instruction *ir, int ir_count)
     fprintf(stderr, "[ARM] Generating code for %d IR instructions ...\n",
             ir_count);
 
-    /* --- Pass 1: collect label addresses ------------------------------- */
+    /* --- Pass 1: collect label addresses + variable declarations ------- */
     ARMSymTab symtab;
     arm_symtab_init(&symtab);
+
+    ARMVarTable vartab;
+    arm_vartab_init(&vartab);
 
     int pc = 0;
     for (int i = 0; i < ir_count; i++) {
         const Instruction *inst = &ir[i];
         if (inst->is_label) {
             arm_symtab_add(&symtab, inst->label_name, pc);
+        } else if (inst->opcode == OP_VAR) {
+            const char *vname = inst->operands[0].data.label;
+            int32_t init_val  = 0;
+            int     has_init  = 0;
+            if (inst->operand_count >= 2 &&
+                inst->operands[1].type == OPERAND_IMMEDIATE) {
+                init_val = (int32_t)inst->operands[1].data.imm;
+                has_init = 1;
+            }
+            arm_vartab_add(&vartab, vname, init_val, has_init);
         } else {
             pc += instruction_size_arm(inst);
         }
+    }
+
+    /* Register variable symbols: each at code_end + index * 4 */
+    int var_base = pc;
+    for (int v = 0; v < vartab.count; v++) {
+        arm_symtab_add(&symtab, vartab.vars[v].name,
+                       var_base + v * ARM_VAR_SIZE);
     }
 
     /* --- Pass 2: code emission ----------------------------------------- */
@@ -1213,8 +1297,69 @@ CodeBuffer* generate_arm(const Instruction *ir, int ir_count)
             break;
         }
 
+        /* ---- VAR — declaration only, no code emitted ------------------ */
+        case OP_VAR:
+            break;
+
+        /* ---- SET name, Rs/imm — store to variable --------------------- */
+        case OP_SET: {
+            const char *vname = inst->operands[0].data.label;
+            int var_addr = arm_symtab_lookup(&symtab, vname);
+            if (var_addr < 0) {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                         "undefined variable '%s'", vname);
+                arm_error(inst, msg);
+            }
+            if (inst->operands[1].type == OPERAND_REGISTER) {
+                int rs = inst->operands[1].data.reg;
+                arm_validate_register(inst, rs);
+                fprintf(stderr, "  SET %s, R%d -> STR %s, [r12]\n",
+                        vname, rs, ARM_REG_NAME[rs]);
+                /* Load address into r12 (scratch) */
+                emit_arm_load_imm32_full(code, ARM_REG_IP,
+                                         (int32_t)var_addr);
+                /* STR Rs, [r12] */
+                emit_arm_str(code, ARM_REG_ENC[rs], ARM_REG_IP);
+            } else {
+                int32_t imm = (int32_t)inst->operands[1].data.imm;
+                fprintf(stderr, "  SET %s, #%d -> STR r11, [r12]\n",
+                        vname, imm);
+                /* Load value into r11 */
+                emit_arm_load_imm32_full(code, ARM_REG_FP, imm);
+                /* Load address into r12 */
+                emit_arm_load_imm32_full(code, ARM_REG_IP,
+                                         (int32_t)var_addr);
+                /* STR r11, [r12] */
+                emit_arm_str(code, ARM_REG_FP, ARM_REG_IP);
+            }
+            break;
+        }
+
+        /* ---- GET Rd, name — load from variable ------------------------ */
+        case OP_GET: {
+            int rd = inst->operands[0].data.reg;
+            const char *vname = inst->operands[1].data.label;
+            arm_validate_register(inst, rd);
+            int var_addr = arm_symtab_lookup(&symtab, vname);
+            if (var_addr < 0) {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                         "undefined variable '%s'", vname);
+                arm_error(inst, msg);
+            }
+            fprintf(stderr, "  GET R%d, %s -> LDR %s, [r12]\n",
+                    rd, vname, ARM_REG_NAME[rd]);
+            /* Load address into r12 */
+            emit_arm_load_imm32_full(code, ARM_REG_IP,
+                                     (int32_t)var_addr);
+            /* LDR Rd, [r12] */
+            emit_arm_ldr(code, ARM_REG_ENC[rd], ARM_REG_IP);
+            break;
+        }
+
         default: {
-            char msg[128];
+            char msg[256];
             snprintf(msg, sizeof(msg),
                      "opcode '%s' is not supported by the ARM backend",
                      opcode_name(inst->opcode));
@@ -1229,7 +1374,8 @@ CodeBuffer* generate_arm(const Instruction *ir, int ir_count)
         ARMFixup *fix = &symtab.fixups[f];
         int target = arm_symtab_lookup(&symtab, fix->label);
         if (target < 0) {
-            fprintf(stderr, "ARM: undefined label '%s' (line %d)\n",
+            fprintf(stderr,
+                    "ARM: undefined label or variable '%s' (line %d)\n",
                     fix->label, fix->line);
             free_code_buffer(code);
             return NULL;
@@ -1254,6 +1400,22 @@ CodeBuffer* generate_arm(const Instruction *ir, int ir_count)
         patch_arm_branch(code, fix->patch_offset, word);
     }
 
-    fprintf(stderr, "[ARM] Emitted %d bytes\n", code->size);
+    /* --- Append variable data section --------------------------------- */
+    int data_start = code->size;
+    for (int v = 0; v < vartab.count; v++) {
+        uint32_t val = (uint32_t)vartab.vars[v].init_value;
+        emit_byte(code, (uint8_t)(val & 0xFF));
+        emit_byte(code, (uint8_t)((val >> 8) & 0xFF));
+        emit_byte(code, (uint8_t)((val >> 16) & 0xFF));
+        emit_byte(code, (uint8_t)((val >> 24) & 0xFF));
+    }
+
+    if (vartab.count > 0) {
+        fprintf(stderr, "[ARM] Emitted %d bytes (%d code + %d data)\n",
+                code->size, data_start,
+                code->size - data_start);
+    } else {
+        fprintf(stderr, "[ARM] Emitted %d bytes\n", code->size);
+    }
     return code;
 }

@@ -74,6 +74,9 @@ static const MnemonicEntry MNEMONIC_TABLE[] = {
     { "INC",   OP_INC   },
     { "DEC",   OP_DEC   },
     { "INT",   OP_INT   },
+    { "VAR",   OP_VAR   },
+    { "SET",   OP_SET   },
+    { "GET",   OP_GET   },
     { NULL,    OP_COUNT }       /* sentinel */
 };
 
@@ -161,6 +164,9 @@ static const OpcodeShape OPCODE_SHAPES[OP_COUNT] = {
     /* OP_INC   */ { 1, { OPERAND_REGISTER,  OPERAND_NONE,       OPERAND_NONE } },
     /* OP_DEC   */ { 1, { OPERAND_REGISTER,  OPERAND_NONE,       OPERAND_NONE } },
     /* OP_INT   */ { 1, { OPERAND_IMMEDIATE, OPERAND_NONE,       OPERAND_NONE } },
+    /* OP_VAR   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } }, /* special */
+    /* OP_SET   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } }, /* special */
+    /* OP_GET   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } }, /* special */
     /* OP_NOP   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
     /* OP_HLT   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
 };
@@ -233,6 +239,9 @@ const char* opcode_name(Opcode op)
         case OP_INC:   return "INC";
         case OP_DEC:   return "DEC";
         case OP_INT:   return "INT";
+        case OP_VAR:   return "VAR";
+        case OP_SET:   return "SET";
+        case OP_GET:   return "GET";
         default:       return "???";
     }
 }
@@ -329,7 +338,7 @@ static void build_operand(const Token *tok, OperandType expected,
     /* --- Register ------------------------------------------------------- */
     if (tok->type == TOKEN_REGISTER) {
         if (expected != OPERAND_REGISTER && expected != OPERAND_REG_OR_IMM) {
-            char msg[128];
+            char msg[256];
             snprintf(msg, sizeof(msg),
                      "for '%s': expected an immediate or label, got register",
                      opcode_str);
@@ -343,7 +352,7 @@ static void build_operand(const Token *tok, OperandType expected,
     /* --- Immediate number ----------------------------------------------- */
     if (tok->type == TOKEN_NUMBER) {
         if (expected != OPERAND_IMMEDIATE && expected != OPERAND_REG_OR_IMM) {
-            char msg[128];
+            char msg[256];
             snprintf(msg, sizeof(msg),
                      "for '%s': expected a register, got immediate value",
                      opcode_str);
@@ -357,7 +366,7 @@ static void build_operand(const Token *tok, OperandType expected,
     /* --- Label reference (identifier used as operand) -------------------- */
     if (tok->type == TOKEN_IDENTIFIER || tok->type == TOKEN_LABEL_REF) {
         if (expected != OPERAND_LABEL_REF) {
-            char msg[128];
+            char msg[256];
             snprintf(msg, sizeof(msg),
                      "for '%s': expected a register or immediate, "
                      "got label reference '%s'",
@@ -379,7 +388,7 @@ static void build_operand(const Token *tok, OperandType expected,
             case OPERAND_LABEL_REF: wanted = "label reference";       break;
             default:                wanted = "register or immediate"; break;
         }
-        char msg[128];
+        char msg[256];
         snprintf(msg, sizeof(msg), "for '%s': expected %s", opcode_str, wanted);
         syntax_error_expected(tok, wanted, msg);
     }
@@ -392,10 +401,12 @@ static void build_operand(const Token *tok, OperandType expected,
  *    pos = 0
  *    while tokens[pos] != EOF:
  *       skip NEWLINE / COMMENT
- *       if LABEL  -> emit label-def instruction
- *       if OPCODE -> look up shape; consume operands; emit instruction
+ *       if LABEL  -> check for '(' => function def, else label
+ *       if OPCODE -> handle VAR/SET/GET specially; rest via shape table
+ *       if IDENTIFIER -> check for call with namespace "file.func(args)"
  *       otherwise -> syntax error
  * ========================================================================= */
+
 Instruction* parse(const Token *tokens, int token_count,
                    int *instruction_count)
 {
@@ -426,7 +437,7 @@ Instruction* parse(const Token *tokens, int token_count,
         /* ---- EOF ------------------------------------------------------ */
         if (cur->type == TOKEN_EOF) break;
 
-        /* ---- Label definition ----------------------------------------- */
+        /* ---- Label or function definition ----------------------------- */
         if (cur->type == TOKEN_LABEL) {
             ir = ensure_ir_capacity(ir, count, &capacity);
             if (!ir) { *instruction_count = 0; return NULL; }
@@ -436,8 +447,66 @@ Instruction* parse(const Token *tokens, int token_count,
             strncpy(inst.label_name, cur->text, UA_MAX_LABEL_LEN - 1);
             inst.label_name[UA_MAX_LABEL_LEN - 1] = '\0';
 
+            pos++;  /* consume the label token */
+
+            /* Check if this is a function definition: label followed by '(' */
+            const Token *next = peek(tokens, pos, token_count);
+            if (next->type == TOKEN_LPAREN) {
+                inst.is_function = 1;
+                inst.param_count = 0;
+                pos++;  /* consume '(' */
+
+                /* Parse parameter list:  name1, name2, ... ) */
+                const Token *t = peek(tokens, pos, token_count);
+                if (t->type != TOKEN_RPAREN) {
+                    /* At least one parameter */
+                    while (1) {
+                        t = peek(tokens, pos, token_count);
+                        if (t->type != TOKEN_IDENTIFIER &&
+                            t->type != TOKEN_REGISTER) {
+                            char msg[256];
+                            snprintf(msg, sizeof(msg),
+                                     "in function '%s' parameter list: "
+                                     "expected parameter name",
+                                     inst.label_name);
+                            syntax_error(t, msg);
+                        }
+                        if (inst.param_count >= MAX_FUNC_PARAMS) {
+                            char msg[256];
+                            snprintf(msg, sizeof(msg),
+                                     "function '%s' exceeds maximum of %d "
+                                     "parameters",
+                                     inst.label_name, MAX_FUNC_PARAMS);
+                            syntax_error(t, msg);
+                        }
+                        strncpy(inst.param_names[inst.param_count],
+                                t->text, UA_MAX_LABEL_LEN - 1);
+                        inst.param_names[inst.param_count]
+                            [UA_MAX_LABEL_LEN - 1] = '\0';
+                        inst.param_count++;
+                        pos++;
+
+                        t = peek(tokens, pos, token_count);
+                        if (t->type == TOKEN_COMMA) {
+                            pos++;  /* consume comma, expect more params */
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                /* Expect closing ')' */
+                t = peek(tokens, pos, token_count);
+                if (t->type != TOKEN_RPAREN) {
+                    char msg[256];
+                    snprintf(msg, sizeof(msg),
+                             "in function '%s': expected ')' after "
+                             "parameter list", inst.label_name);
+                    syntax_error(t, msg);
+                }
+                pos++;  /* consume ')' */
+            }
+
             ir[count++] = inst;
-            pos++;
 
             /* Skip trailing comments / newline on the same line */
             while (pos < token_count &&
@@ -455,53 +524,271 @@ Instruction* parse(const Token *tokens, int token_count,
                 syntax_error(cur, "unknown opcode (internal error)");
             }
 
-            const OpcodeShape *shape = &OPCODE_SHAPES[op];
-
             Instruction inst = make_empty_instruction(cur->line, cur->column);
             inst.is_label      = 0;
             inst.opcode        = op;
-            inst.operand_count = shape->count;
 
             pos++;  /* consume the opcode token */
 
-            /* --- Parse operands according to the shape table ------------ */
-            for (int i = 0; i < shape->count; i++) {
+            /* =============================================================
+             *  VAR name [, initial_value]
+             *  Declares a variable.  Operand 0 = label (name),
+             *  optionally operand 1 = immediate (initial value).
+             * ============================================================= */
+            if (op == OP_VAR) {
+                const Token *name_tok = peek(tokens, pos, token_count);
+                if (name_tok->type != TOKEN_IDENTIFIER &&
+                    name_tok->type != TOKEN_LABEL_REF) {
+                    syntax_error_expected(name_tok, "variable name",
+                                          "after 'VAR'");
+                }
+                inst.operands[0].type = OPERAND_LABEL_REF;
+                strncpy(inst.operands[0].data.label,
+                        name_tok->text, UA_MAX_LABEL_LEN - 1);
+                inst.operands[0].data.label[UA_MAX_LABEL_LEN - 1] = '\0';
+                inst.operand_count = 1;
+                pos++;
 
-                /* Between operands (i > 0) we require a comma */
-                if (i > 0) {
-                    const Token *comma = peek(tokens, pos, token_count);
-                    if (comma->type != TOKEN_COMMA) {
-                        char ctx[128];
-                        snprintf(ctx, sizeof(ctx),
-                                 "after operand %d of '%s'",
-                                 i, opcode_name(op));
-                        syntax_error_expected(comma, "','", ctx);
+                /* Optional initial value: VAR name, 42 */
+                const Token *maybe_comma = peek(tokens, pos, token_count);
+                if (maybe_comma->type == TOKEN_COMMA) {
+                    pos++;
+                    const Token *val_tok = peek(tokens, pos, token_count);
+                    if (val_tok->type == TOKEN_NUMBER) {
+                        inst.operands[1].type     = OPERAND_IMMEDIATE;
+                        inst.operands[1].data.imm = val_tok->value;
+                        inst.operand_count = 2;
+                        pos++;
+                    } else {
+                        syntax_error_expected(val_tok,
+                            "initial value (number)",
+                            "after 'VAR name,'");
                     }
-                    pos++;  /* consume comma */
                 }
 
-                /* The actual operand */
-                const Token *operand_tok = peek(tokens, pos, token_count);
-
-                /* Check we haven't hit end-of-line prematurely */
-                if (is_line_terminator(operand_tok)) {
-                    char msg[128];
-                    snprintf(msg, sizeof(msg),
-                             "'%s' expects %d operand(s), but only %d given",
-                             opcode_name(op), shape->count, i);
-                    syntax_error(operand_tok, msg);
-                }
-
-                build_operand(operand_tok, shape->shape[i],
-                              opcode_name(op), &inst.operands[i]);
-                pos++;  /* consume operand token */
+                goto emit_instruction;
             }
 
-            /* --- After all operands: must hit line terminator ----------- */
+            /* =============================================================
+             *  SET name, Rs/imm
+             *  Store a register or immediate into a named variable.
+             *  Operand 0 = label (var name), operand 1 = reg or imm.
+             * ============================================================= */
+            if (op == OP_SET) {
+                const Token *name_tok = peek(tokens, pos, token_count);
+                if (name_tok->type != TOKEN_IDENTIFIER &&
+                    name_tok->type != TOKEN_LABEL_REF) {
+                    syntax_error_expected(name_tok, "variable name",
+                                          "after 'SET'");
+                }
+                inst.operands[0].type = OPERAND_LABEL_REF;
+                strncpy(inst.operands[0].data.label,
+                        name_tok->text, UA_MAX_LABEL_LEN - 1);
+                inst.operands[0].data.label[UA_MAX_LABEL_LEN - 1] = '\0';
+                pos++;
+
+                const Token *comma = peek(tokens, pos, token_count);
+                if (comma->type != TOKEN_COMMA) {
+                    syntax_error_expected(comma, "','", "after SET name");
+                }
+                pos++;
+
+                const Token *val_tok = peek(tokens, pos, token_count);
+                if (val_tok->type == TOKEN_REGISTER) {
+                    inst.operands[1].type     = OPERAND_REGISTER;
+                    inst.operands[1].data.reg = (int)val_tok->value;
+                } else if (val_tok->type == TOKEN_NUMBER) {
+                    inst.operands[1].type     = OPERAND_IMMEDIATE;
+                    inst.operands[1].data.imm = val_tok->value;
+                } else {
+                    syntax_error_expected(val_tok,
+                        "register or immediate",
+                        "for 'SET name, value'");
+                }
+                inst.operand_count = 2;
+                pos++;
+
+                goto emit_instruction;
+            }
+
+            /* =============================================================
+             *  GET Rd, name
+             *  Load a named variable into a register.
+             *  Operand 0 = register, operand 1 = label (var name).
+             * ============================================================= */
+            if (op == OP_GET) {
+                const Token *reg_tok = peek(tokens, pos, token_count);
+                if (reg_tok->type != TOKEN_REGISTER) {
+                    syntax_error_expected(reg_tok, "register",
+                                          "after 'GET'");
+                }
+                inst.operands[0].type     = OPERAND_REGISTER;
+                inst.operands[0].data.reg = (int)reg_tok->value;
+                pos++;
+
+                const Token *comma = peek(tokens, pos, token_count);
+                if (comma->type != TOKEN_COMMA) {
+                    syntax_error_expected(comma, "','", "after GET Rd");
+                }
+                pos++;
+
+                const Token *name_tok = peek(tokens, pos, token_count);
+                if (name_tok->type != TOKEN_IDENTIFIER &&
+                    name_tok->type != TOKEN_LABEL_REF) {
+                    syntax_error_expected(name_tok, "variable name",
+                                          "for 'GET Rd, name'");
+                }
+                inst.operands[1].type = OPERAND_LABEL_REF;
+                strncpy(inst.operands[1].data.label,
+                        name_tok->text, UA_MAX_LABEL_LEN - 1);
+                inst.operands[1].data.label[UA_MAX_LABEL_LEN - 1] = '\0';
+                inst.operand_count = 2;
+                pos++;
+
+                goto emit_instruction;
+            }
+
+            /* =============================================================
+             *  CALL with arguments:  CALL func(arg1, arg2, ...)
+             *  The label operand is already consumed by the shape table.
+             *  But we need to detect '(' after the label to handle args.
+             * ============================================================= */
+            if (op == OP_CALL) {
+                /* Consume the label/identifier operand */
+                const Token *label_tok = peek(tokens, pos, token_count);
+                if (is_line_terminator(label_tok)) {
+                    syntax_error(label_tok,
+                                 "'CALL' expects a label or function name");
+                }
+                if (label_tok->type != TOKEN_IDENTIFIER &&
+                    label_tok->type != TOKEN_LABEL_REF) {
+                    syntax_error_expected(label_tok,
+                        "label or function name", "after 'CALL'");
+                }
+                inst.operands[0].type = OPERAND_LABEL_REF;
+                strncpy(inst.operands[0].data.label,
+                        label_tok->text, UA_MAX_LABEL_LEN - 1);
+                inst.operands[0].data.label[UA_MAX_LABEL_LEN - 1] = '\0';
+                inst.operand_count = 1;
+                pos++;
+
+                /* Check for '(' — function call with arguments */
+                const Token *paren = peek(tokens, pos, token_count);
+                if (paren->type == TOKEN_LPAREN) {
+                    pos++;  /* consume '(' */
+
+                    /* Parse argument list: reg/imm, reg/imm, ... ) */
+                    /* Arguments are stored as operands[1], operands[2] via
+                     * the function definition's parameter mapping in the
+                     * backend.  We encode the argument count using
+                     * is_function + param_count on the CALL instruction. */
+                    inst.is_function = 1;   /* flag: has args */
+                    inst.param_count = 0;
+
+                    const Token *t = peek(tokens, pos, token_count);
+                    if (t->type != TOKEN_RPAREN) {
+                        while (1) {
+                            t = peek(tokens, pos, token_count);
+                            if (inst.param_count >= MAX_FUNC_PARAMS) {
+                                char msg[256];
+                                snprintf(msg, sizeof(msg),
+                                    "CALL '%s': too many arguments (max %d)",
+                                    inst.operands[0].data.label,
+                                    MAX_FUNC_PARAMS);
+                                syntax_error(t, msg);
+                            }
+                            /* Store arg name so backends can handle it */
+                            if (t->type == TOKEN_REGISTER) {
+                                /* Encode register as "Rn" string */
+                                snprintf(
+                                    inst.param_names[inst.param_count],
+                                    UA_MAX_LABEL_LEN, "R%d",
+                                    (int)t->value);
+                            } else if (t->type == TOKEN_NUMBER) {
+                                /* Encode immediate as "#nnn" string */
+                                snprintf(
+                                    inst.param_names[inst.param_count],
+                                    UA_MAX_LABEL_LEN, "#%lld",
+                                    (long long)t->value);
+                            } else if (t->type == TOKEN_IDENTIFIER) {
+                                /* Variable reference as argument */
+                                strncpy(
+                                    inst.param_names[inst.param_count],
+                                    t->text, UA_MAX_LABEL_LEN - 1);
+                                inst.param_names[inst.param_count]
+                                    [UA_MAX_LABEL_LEN - 1] = '\0';
+                            } else {
+                                syntax_error_expected(t,
+                                    "register, number, or variable",
+                                    "in function argument list");
+                            }
+                            inst.param_count++;
+                            pos++;
+
+                            t = peek(tokens, pos, token_count);
+                            if (t->type == TOKEN_COMMA) {
+                                pos++;
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+                    t = peek(tokens, pos, token_count);
+                    if (t->type != TOKEN_RPAREN) {
+                        char msg[256];
+                        snprintf(msg, sizeof(msg),
+                            "CALL '%s': expected ')' after argument list",
+                            inst.operands[0].data.label);
+                        syntax_error(t, msg);
+                    }
+                    pos++;  /* consume ')' */
+                }
+
+                goto emit_instruction;
+            }
+
+            /* =============================================================
+             *  Standard opcode — shape-table driven parsing
+             * ============================================================= */
+            {
+                const OpcodeShape *shape = &OPCODE_SHAPES[op];
+                inst.operand_count = shape->count;
+
+                for (int i = 0; i < shape->count; i++) {
+                    if (i > 0) {
+                        const Token *comma = peek(tokens, pos, token_count);
+                        if (comma->type != TOKEN_COMMA) {
+                            char ctx[128];
+                            snprintf(ctx, sizeof(ctx),
+                                     "after operand %d of '%s'",
+                                     i, opcode_name(op));
+                            syntax_error_expected(comma, "','", ctx);
+                        }
+                        pos++;
+                    }
+
+                    const Token *operand_tok = peek(tokens, pos, token_count);
+                    if (is_line_terminator(operand_tok)) {
+                        char msg[256];
+                        snprintf(msg, sizeof(msg),
+                                 "'%s' expects %d operand(s), but only "
+                                 "%d given",
+                                 opcode_name(op), shape->count, i);
+                        syntax_error(operand_tok, msg);
+                    }
+
+                    build_operand(operand_tok, shape->shape[i],
+                                  opcode_name(op), &inst.operands[i]);
+                    pos++;
+                }
+            }
+
+            /* ------- Emit the instruction ------------------------------- */
+            emit_instruction:
             {
                 const Token *after = peek(tokens, pos, token_count);
                 if (!is_line_terminator(after) && after->type != TOKEN_EOF) {
-                    char msg[128];
+                    char msg[256];
                     snprintf(msg, sizeof(msg),
                              "unexpected token after '%s' instruction "
                              "(expected end of line)",
@@ -510,12 +797,10 @@ Instruction* parse(const Token *tokens, int token_count,
                 }
             }
 
-            /* Emit instruction */
             ir = ensure_ir_capacity(ir, count, &capacity);
             if (!ir) { *instruction_count = 0; return NULL; }
             ir[count++] = inst;
 
-            /* Consume rest of line (comments, newline) */
             while (pos < token_count &&
                    (tokens[pos].type == TOKEN_COMMENT ||
                     tokens[pos].type == TOKEN_NEWLINE)) {
@@ -524,8 +809,185 @@ Instruction* parse(const Token *tokens, int token_count,
             continue;
         }
 
+        /* ---- Identifier — potential func definition or call ------------- */
+        if (cur->type == TOKEN_IDENTIFIER) {
+            /* Check if this is a function call: identifier followed by '(' */
+            const Token *next = peek(tokens, pos + 1, token_count);
+            if (next->type == TOKEN_LPAREN) {
+                /* Look ahead past matching ')' to see if ':' follows
+                 * (function definition) or not (function call).           */
+                int is_def = 0;
+                {
+                    int depth = 1;
+                    int scan  = pos + 2;
+                    while (scan < token_count && depth > 0) {
+                        if (tokens[scan].type == TOKEN_LPAREN)  depth++;
+                        if (tokens[scan].type == TOKEN_RPAREN)  depth--;
+                        scan++;
+                    }
+                    if (scan < token_count &&
+                        tokens[scan].type == TOKEN_COLON) {
+                        is_def = 1;
+                    }
+                }
+
+                if (is_def) {
+                    /* ---- Function definition: ident(params): ---------- */
+                    ir = ensure_ir_capacity(ir, count, &capacity);
+                    if (!ir) { *instruction_count = 0; return NULL; }
+
+                    Instruction inst = make_empty_instruction(
+                        cur->line, cur->column);
+                    inst.is_label    = 1;
+                    inst.is_function = 1;
+                    inst.param_count = 0;
+                    strncpy(inst.label_name, cur->text,
+                            UA_MAX_LABEL_LEN - 1);
+                    inst.label_name[UA_MAX_LABEL_LEN - 1] = '\0';
+                    pos += 2;  /* consume identifier + '(' */
+
+                    const Token *t = peek(tokens, pos, token_count);
+                    if (t->type != TOKEN_RPAREN) {
+                        while (1) {
+                            t = peek(tokens, pos, token_count);
+                            if (t->type != TOKEN_IDENTIFIER &&
+                                t->type != TOKEN_REGISTER) {
+                                char msg[256];
+                                snprintf(msg, sizeof(msg),
+                                         "in function '%s' parameter list: "
+                                         "expected parameter name",
+                                         inst.label_name);
+                                syntax_error(t, msg);
+                            }
+                            if (inst.param_count >= MAX_FUNC_PARAMS) {
+                                char msg[256];
+                                snprintf(msg, sizeof(msg),
+                                         "function '%s' exceeds maximum "
+                                         "of %d parameters",
+                                         inst.label_name, MAX_FUNC_PARAMS);
+                                syntax_error(t, msg);
+                            }
+                            strncpy(inst.param_names[inst.param_count],
+                                    t->text, UA_MAX_LABEL_LEN - 1);
+                            inst.param_names[inst.param_count]
+                                [UA_MAX_LABEL_LEN - 1] = '\0';
+                            inst.param_count++;
+                            pos++;
+
+                            t = peek(tokens, pos, token_count);
+                            if (t->type == TOKEN_COMMA) {
+                                pos++;
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+                    t = peek(tokens, pos, token_count);
+                    if (t->type != TOKEN_RPAREN) {
+                        char msg[256];
+                        snprintf(msg, sizeof(msg),
+                                 "in function '%s': expected ')' after "
+                                 "parameter list", inst.label_name);
+                        syntax_error(t, msg);
+                    }
+                    pos++;  /* consume ')' */
+
+                    /* Consume the trailing ':' */
+                    t = peek(tokens, pos, token_count);
+                    if (t->type == TOKEN_COLON) {
+                        pos++;
+                    }
+
+                    ir[count++] = inst;
+
+                    while (pos < token_count &&
+                           (tokens[pos].type == TOKEN_COMMENT ||
+                            tokens[pos].type == TOKEN_NEWLINE)) {
+                        pos++;
+                    }
+                    continue;
+                }
+
+                /* ---- Function call: identifier(args) ---- */
+                Instruction inst = make_empty_instruction(
+                    cur->line, cur->column);
+                inst.is_label = 0;
+                inst.opcode   = OP_CALL;
+                inst.operands[0].type = OPERAND_LABEL_REF;
+                strncpy(inst.operands[0].data.label,
+                        cur->text, UA_MAX_LABEL_LEN - 1);
+                inst.operands[0].data.label[UA_MAX_LABEL_LEN - 1] = '\0';
+                inst.operand_count = 1;
+                inst.is_function = 1;
+                inst.param_count = 0;
+                pos += 2;  /* consume identifier + '(' */
+
+                const Token *t = peek(tokens, pos, token_count);
+                if (t->type != TOKEN_RPAREN) {
+                    while (1) {
+                        t = peek(tokens, pos, token_count);
+                        if (inst.param_count >= MAX_FUNC_PARAMS) {
+                            char msg[256];
+                            snprintf(msg, sizeof(msg),
+                                "Call '%s': too many arguments (max %d)",
+                                inst.operands[0].data.label,
+                                MAX_FUNC_PARAMS);
+                            syntax_error(t, msg);
+                        }
+                        if (t->type == TOKEN_REGISTER) {
+                            snprintf(inst.param_names[inst.param_count],
+                                     UA_MAX_LABEL_LEN, "R%d",
+                                     (int)t->value);
+                        } else if (t->type == TOKEN_NUMBER) {
+                            snprintf(inst.param_names[inst.param_count],
+                                     UA_MAX_LABEL_LEN, "#%lld",
+                                     (long long)t->value);
+                        } else if (t->type == TOKEN_IDENTIFIER) {
+                            strncpy(inst.param_names[inst.param_count],
+                                    t->text, UA_MAX_LABEL_LEN - 1);
+                            inst.param_names[inst.param_count]
+                                [UA_MAX_LABEL_LEN - 1] = '\0';
+                        } else {
+                            syntax_error_expected(t,
+                                "register, number, or variable",
+                                "in function argument list");
+                        }
+                        inst.param_count++;
+                        pos++;
+
+                        t = peek(tokens, pos, token_count);
+                        if (t->type == TOKEN_COMMA) {
+                            pos++;
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                t = peek(tokens, pos, token_count);
+                if (t->type != TOKEN_RPAREN) {
+                    char msg[256];
+                    snprintf(msg, sizeof(msg),
+                        "Call '%s': expected ')'",
+                        inst.operands[0].data.label);
+                    syntax_error(t, msg);
+                }
+                pos++;
+
+                ir = ensure_ir_capacity(ir, count, &capacity);
+                if (!ir) { *instruction_count = 0; return NULL; }
+                ir[count++] = inst;
+
+                while (pos < token_count &&
+                       (tokens[pos].type == TOKEN_COMMENT ||
+                        tokens[pos].type == TOKEN_NEWLINE)) {
+                    pos++;
+                }
+                continue;
+            }
+        }
+
         /* ---- Anything else is a syntax error -------------------------- */
-        syntax_error(cur, "expected an opcode or label");
+        syntax_error(cur, "expected an opcode, label, or function call");
     }
 
     *instruction_count = count;

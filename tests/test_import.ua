@@ -1,9 +1,10 @@
-; test_import.ua — tests @IMPORT and duplicate prevention
-LDI R0, 10
+; test_import.ua — test @IMPORT namespace feature
+@IMPORT "math.ua"
 
-@IMPORT "test_import_lib.ua"
+    JMP  start
 
-; second import of same file — should be skipped
-@IMPORT "test_import_lib.ua"
-
-HLT
+start:
+    LDI  R0, 7
+    CALL math.double_it
+    ; R0 should now be 14
+    HLT
