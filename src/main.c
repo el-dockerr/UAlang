@@ -14,13 +14,13 @@
  *   --run   JIT-execute the code  (x86 only, skips .bin write)
  *
  *  Pipeline:
- *   Parse Args -> Read File -> Lexer -> Parser
+ *   Parse Args -> Read File -> Precompiler -> Lexer -> Parser
  *      -> Backend (arch-specific) -> Write .bin  OR  JIT execute -> Cleanup
  *
  *  Build:  gcc -std=c99 -Wall -Wextra -pedantic -o ua.exe \
- *              main.c lexer.c parser.c codegen.c backend_8051.c \
- *              backend_x86_64.c backend_x86_32.c backend_arm.c \
- *              emitter_pe.c emitter_elf.c
+ *              main.c lexer.c parser.c codegen.c precompiler.c \
+ *              backend_8051.c backend_x86_64.c backend_x86_32.c \
+ *              backend_arm.c emitter_pe.c emitter_elf.c
  *
  *  License: MIT
  * =============================================================================
@@ -39,6 +39,7 @@
 #include "backend_arm.h"
 #include "emitter_pe.h"
 #include "emitter_elf.h"
+#include "precompiler.h"
 
 #define UA_VERSION "26.0.1-ALPHA"
 
@@ -379,11 +380,37 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    /* --- 2b. Precompiler ----------------------------------------------- */
+    char base_dir[1024];
+    {
+        const char *last_sep = NULL;
+        for (const char *p = cfg.input_file; *p; p++) {
+            if (*p == '/' || *p == '\\') last_sep = p;
+        }
+        if (last_sep) {
+            int dlen = (int)(last_sep - cfg.input_file + 1);
+            if (dlen >= (int)sizeof(base_dir)) dlen = (int)sizeof(base_dir) - 1;
+            memcpy(base_dir, cfg.input_file, (size_t)dlen);
+            base_dir[dlen] = '\0';
+        } else {
+            base_dir[0] = '.'; base_dir[1] = '\0';
+        }
+    }
+    char *preprocessed = preprocess(source, cfg.arch, cfg.sys,
+                                    base_dir, cfg.input_file);
+    if (!preprocessed) {
+        fprintf(stderr, "Error: preprocessing failed.\n");
+        free(source);
+        return EXIT_FAILURE;
+    }
+    fprintf(stderr, "[Precompiler] Done\n");
+
     /* --- 3. Lexer ------------------------------------------------------ */
     int token_count = 0;
-    Token *tokens = tokenize(source, &token_count);
+    Token *tokens = tokenize(preprocessed, &token_count);
     if (!tokens) {
         fprintf(stderr, "Error: tokenization failed.\n");
+        free(preprocessed);
         free(source);
         return EXIT_FAILURE;
     }
@@ -395,6 +422,7 @@ int main(int argc, char *argv[])
     if (!ir) {
         fprintf(stderr, "Error: parsing failed.\n");
         free(tokens);
+        free(preprocessed);
         free(source);
         return EXIT_FAILURE;
     }
@@ -569,6 +597,7 @@ int main(int argc, char *argv[])
     /* --- 6. Cleanup ---------------------------------------------------- */
     free_instructions(ir);
     free(tokens);
+    free(preprocessed);
     free(source);
 
     return rc;

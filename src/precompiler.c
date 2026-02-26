@@ -1,0 +1,657 @@
+/*
+ * =============================================================================
+ *  UA - Unified Assembler
+ *  Precompiler (Preprocessor) — Implementation
+ *
+ *  File:    precompiler.c
+ *  Purpose: Evaluate @-directives before lexing.
+ *
+ *  ┌──────────────────────────────────────────────────────────────────────────┐
+ *  │  Directive            Action                                           │
+ *  │  ──────────────────── ──────────────────────────────────────────────    │
+ *  │  @IF_ARCH <arch>      Push conditional: active when -arch matches      │
+ *  │  @IF_SYS  <sys>       Push conditional: active when -sys  matches      │
+ *  │  @ENDIF               Pop one conditional level                        │
+ *  │  @IMPORT  <path>      Include file (skipped if already imported)       │
+ *  │  @DUMMY   [message]   Emit a diagnostic stub marker to stderr          │
+ *  │                                                                        │
+ *  │  Processing order:                                                     │
+ *  │    1. Line-by-line scan of the source                                  │
+ *  │    2. Conditional nesting tracked with active_depth / total_depth      │
+ *  │    3. @IMPORT triggers recursive preprocessing of the imported file    │
+ *  │    4. Blank lines emitted for directives to preserve line numbering    │
+ *  └──────────────────────────────────────────────────────────────────────────┘
+ *
+ *  License: MIT
+ * =============================================================================
+ */
+
+#include "precompiler.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* =========================================================================
+ *  Compile-time limits
+ * ========================================================================= */
+#define PP_MAX_COND_DEPTH     64    /* Max nesting of @IF blocks             */
+#define PP_MAX_IMPORT_DEPTH   16    /* Max recursive @IMPORT depth           */
+#define PP_MAX_IMPORTS        256   /* Max unique imported files              */
+#define PP_MAX_PATH_LEN       1024  /* Max file path length                  */
+#define PP_MAX_DIRECTIVE_LEN  32    /* Max directive keyword length           */
+#define PP_INITIAL_BUF_CAP    4096  /* Initial output-buffer capacity        */
+
+/* =========================================================================
+ *  Dynamic string buffer
+ *
+ *  Grows by doubling.  All append operations return 0 on success, -1 on
+ *  out-of-memory.  The caller detaches the data pointer via strbuf_detach()
+ *  and later free()s it.
+ * ========================================================================= */
+typedef struct {
+    char *data;
+    int   size;
+    int   capacity;
+} StrBuf;
+
+static int strbuf_init(StrBuf *sb)
+{
+    sb->data = (char *)malloc(PP_INITIAL_BUF_CAP);
+    if (!sb->data) return -1;
+    sb->size     = 0;
+    sb->capacity = PP_INITIAL_BUF_CAP;
+    return 0;
+}
+
+static int strbuf_grow(StrBuf *sb, int needed)
+{
+    if (sb->size + needed <= sb->capacity) return 0;
+    int new_cap = sb->capacity;
+    while (new_cap < sb->size + needed) new_cap *= 2;
+    char *p = (char *)realloc(sb->data, (size_t)new_cap);
+    if (!p) return -1;
+    sb->data     = p;
+    sb->capacity = new_cap;
+    return 0;
+}
+
+static int strbuf_append(StrBuf *sb, const char *s, int len)
+{
+    if (len <= 0) return 0;
+    if (strbuf_grow(sb, len) != 0) return -1;
+    memcpy(sb->data + sb->size, s, (size_t)len);
+    sb->size += len;
+    return 0;
+}
+
+static int strbuf_append_char(StrBuf *sb, char c)
+{
+    return strbuf_append(sb, &c, 1);
+}
+
+static void strbuf_free(StrBuf *sb)
+{
+    free(sb->data);
+    sb->data     = NULL;
+    sb->size     = 0;
+    sb->capacity = 0;
+}
+
+/* =========================================================================
+ *  Portable helpers (pure C99 — no POSIX dependency)
+ * ========================================================================= */
+
+/* Case-insensitive string compare */
+static int pp_casecmp(const char *a, const char *b)
+{
+    while (*a && *b) {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z') ca = (char)(ca + 32);
+        if (cb >= 'A' && cb <= 'Z') cb = (char)(cb + 32);
+        if (ca != cb) return (unsigned char)ca - (unsigned char)cb;
+        a++;
+        b++;
+    }
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
+/* Portable strdup (strdup is POSIX, not C99) */
+static char* pp_strdup(const char *s)
+{
+    size_t len = strlen(s) + 1;
+    char  *dup = (char *)malloc(len);
+    if (dup) memcpy(dup, s, len);
+    return dup;
+}
+
+/* =========================================================================
+ *  Path utilities
+ * ========================================================================= */
+
+/* Replace every backslash with a forward slash (in place). */
+static void pp_normalize_seps(char *path)
+{
+    for (char *p = path; *p; p++) {
+        if (*p == '\\') *p = '/';
+    }
+}
+
+/* Is the path absolute?  (Unix '/' or Windows drive letter 'C:\') */
+static int pp_is_absolute(const char *path)
+{
+    if (!path || !*path) return 0;
+    if (path[0] == '/' || path[0] == '\\') return 1;
+    if (((path[0] >= 'A' && path[0] <= 'Z') ||
+         (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':')
+        return 1;
+    return 0;
+}
+
+/* Resolve *relative* against *base_dir*.  Writes to *out*.  Returns 0. */
+static int pp_resolve_path(const char *base_dir, const char *relative,
+                           char *out, int out_size)
+{
+    if (pp_is_absolute(relative)) {
+        if ((int)strlen(relative) >= out_size) return -1;
+        strcpy(out, relative);
+    } else {
+        int blen = (int)strlen(base_dir);
+        int rlen = (int)strlen(relative);
+        if (blen + 1 + rlen + 1 > out_size) return -1;
+        memcpy(out, base_dir, (size_t)blen);
+        if (blen > 0 && base_dir[blen - 1] != '/' &&
+            base_dir[blen - 1] != '\\') {
+            out[blen] = '/';
+            memcpy(out + blen + 1, relative, (size_t)rlen + 1);
+        } else {
+            memcpy(out + blen, relative, (size_t)rlen + 1);
+        }
+    }
+    pp_normalize_seps(out);
+    return 0;
+}
+
+/* Extract the directory part of a path into *dir*. */
+static void pp_extract_dir(const char *path, char *dir, int dir_size)
+{
+    int len      = (int)strlen(path);
+    int last_sep = -1;
+    for (int i = 0; i < len; i++) {
+        if (path[i] == '/' || path[i] == '\\') last_sep = i;
+    }
+    if (last_sep < 0) {
+        /* No separator — current directory */
+        if (dir_size >= 2) { dir[0] = '.'; dir[1] = '\0'; }
+        else if (dir_size >= 1)            dir[0] = '\0';
+    } else {
+        int copy = last_sep + 1;               /* include the separator */
+        if (copy >= dir_size) copy = dir_size - 1;
+        memcpy(dir, path, (size_t)copy);
+        dir[copy] = '\0';
+    }
+}
+
+/* =========================================================================
+ *  Read an entire file into a heap-allocated string.
+ *  Returns NULL on failure (diagnostic printed to stderr).
+ * ========================================================================= */
+static char* pp_read_file(const char *path)
+{
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        fprintf(stderr, "[Precompiler] Error: cannot open '%s': ", path);
+        perror(NULL);
+        return NULL;
+    }
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fprintf(stderr, "[Precompiler] Error: fseek failed on '%s'\n", path);
+        fclose(fp);
+        return NULL;
+    }
+    long length = ftell(fp);
+    if (length < 0) {
+        fprintf(stderr, "[Precompiler] Error: ftell failed on '%s'\n", path);
+        fclose(fp);
+        return NULL;
+    }
+    rewind(fp);
+
+    char *buf = (char *)malloc((size_t)length + 1);
+    if (!buf) {
+        fprintf(stderr, "[Precompiler] Error: out of memory reading '%s'\n",
+                path);
+        fclose(fp);
+        return NULL;
+    }
+    size_t nread = fread(buf, 1, (size_t)length, fp);
+    buf[nread]   = '\0';
+    fclose(fp);
+    return buf;
+}
+
+/* =========================================================================
+ *  Import de-duplication state  (shared across recursive calls)
+ * ========================================================================= */
+typedef struct {
+    const char *arch;                           /* -arch value              */
+    const char *sys;                            /* -sys  value  (or NULL)   */
+    char       *imported[PP_MAX_IMPORTS];       /* normalised import paths  */
+    int         import_count;
+} PPState;
+
+static void pp_state_init(PPState *st, const char *arch, const char *sys)
+{
+    st->arch         = arch;
+    st->sys          = sys;
+    st->import_count = 0;
+}
+
+static void pp_state_free(PPState *st)
+{
+    for (int i = 0; i < st->import_count; i++)
+        free(st->imported[i]);
+    st->import_count = 0;
+}
+
+static int pp_was_imported(const PPState *st, const char *path)
+{
+    for (int i = 0; i < st->import_count; i++) {
+        if (strcmp(st->imported[i], path) == 0) return 1;
+    }
+    return 0;
+}
+
+static int pp_mark_imported(PPState *st, const char *path)
+{
+    if (st->import_count >= PP_MAX_IMPORTS) {
+        fprintf(stderr,
+                "[Precompiler] Error: import limit exceeded (max %d files)\n",
+                PP_MAX_IMPORTS);
+        return -1;
+    }
+    st->imported[st->import_count] = pp_strdup(path);
+    if (!st->imported[st->import_count]) {
+        fprintf(stderr, "[Precompiler] Error: out of memory\n");
+        return -1;
+    }
+    st->import_count++;
+    return 0;
+}
+
+/* =========================================================================
+ *  Internal preprocessing worker  (recursive for @IMPORT)
+ *
+ *  Walks the source line-by-line, evaluates directives, and appends
+ *  surviving lines to *output*.
+ *
+ *  Conditional nesting uses a two-counter scheme:
+ *    total_depth   — incremented on every @IF_*, decremented on @ENDIF
+ *    active_depth  — tracks how many nested levels are *active*
+ *  A line is in an active region iff  active_depth == total_depth.
+ *
+ *  Returns 0 on success, -1 on error (diagnostic already printed).
+ * ========================================================================= */
+static int pp_process(const char *source,
+                      const char *filename,
+                      PPState    *state,
+                      const char *base_dir,
+                      int         depth,
+                      StrBuf     *output)
+{
+    if (depth > PP_MAX_IMPORT_DEPTH) {
+        fprintf(stderr,
+                "[Precompiler] Error: @IMPORT nesting exceeds %d levels "
+                "(circular import?)\n", PP_MAX_IMPORT_DEPTH);
+        return -1;
+    }
+
+    int total_depth  = 0;   /* total @IF nesting          */
+    int active_depth = 0;   /* nesting levels with TRUE   */
+    int line_num     = 1;
+    const char *p    = source;
+
+    while (*p) {
+        /* ---- Extract one source line ---------------------------------- */
+        const char *line_start = p;
+        while (*p && *p != '\n') p++;
+        int line_len = (int)(p - line_start);
+        /* Strip trailing \r (CRLF line endings from binary-mode read) */
+        if (line_len > 0 && line_start[line_len - 1] == '\r')
+            line_len--;
+        if (*p == '\n') p++;                     /* consume the newline */
+
+        /* ---- Skip leading whitespace ---------------------------------- */
+        const char *trimmed = line_start;
+        while (trimmed < line_start + line_len &&
+               (*trimmed == ' ' || *trimmed == '\t'))
+            trimmed++;
+        int trimmed_len = (int)(line_start + line_len - trimmed);
+
+        int is_active = (active_depth == total_depth);
+
+        /* ================================================================
+         *  @-directive?
+         * ============================================================== */
+        if (trimmed_len > 0 && *trimmed == '@') {
+
+            /* ---- Parse directive keyword ------------------------------ */
+            const char *dname     = trimmed + 1;          /* skip '@' */
+            const char *dname_end = dname;
+            while (dname_end < line_start + line_len &&
+                   *dname_end != ' ' && *dname_end != '\t')
+                dname_end++;
+            int dlen = (int)(dname_end - dname);
+
+            char directive[PP_MAX_DIRECTIVE_LEN];
+            if (dlen >= PP_MAX_DIRECTIVE_LEN) dlen = PP_MAX_DIRECTIVE_LEN - 1;
+            memcpy(directive, dname, (size_t)dlen);
+            directive[dlen] = '\0';
+
+            /* ---- Skip whitespace after keyword → start of argument ---- */
+            const char *arg = dname_end;
+            while (arg < line_start + line_len &&
+                   (*arg == ' ' || *arg == '\t'))
+                arg++;
+            const char *line_end = line_start + line_len;
+
+            /* ============================================================
+             *  @IF_ARCH <arch>
+             * ========================================================== */
+            if (pp_casecmp(directive, "IF_ARCH") == 0) {
+
+                /* Extract architecture token */
+                const char *a = arg;
+                while (a < line_end && *a != ' ' && *a != '\t' && *a != ';')
+                    a++;
+                int alen = (int)(a - arg);
+                if (alen <= 0) {
+                    fprintf(stderr,
+                            "[Precompiler] %s:%d: @IF_ARCH requires "
+                            "an architecture name\n", filename, line_num);
+                    return -1;
+                }
+                char arch_tok[64];
+                if (alen >= 64) alen = 63;
+                memcpy(arch_tok, arg, (size_t)alen);
+                arch_tok[alen] = '\0';
+
+                total_depth++;
+                if (total_depth > PP_MAX_COND_DEPTH) {
+                    fprintf(stderr,
+                            "[Precompiler] %s:%d: conditional nesting "
+                            "exceeds %d levels\n",
+                            filename, line_num, PP_MAX_COND_DEPTH);
+                    return -1;
+                }
+                if (is_active && pp_casecmp(arch_tok, state->arch) == 0)
+                    active_depth++;
+
+                /* Emit blank line to preserve line numbering */
+                if (strbuf_append_char(output, '\n') != 0) return -1;
+            }
+            /* ============================================================
+             *  @IF_SYS <system>
+             * ========================================================== */
+            else if (pp_casecmp(directive, "IF_SYS") == 0) {
+
+                const char *a = arg;
+                while (a < line_end && *a != ' ' && *a != '\t' && *a != ';')
+                    a++;
+                int slen = (int)(a - arg);
+                if (slen <= 0) {
+                    fprintf(stderr,
+                            "[Precompiler] %s:%d: @IF_SYS requires "
+                            "a system name\n", filename, line_num);
+                    return -1;
+                }
+                char sys_tok[64];
+                if (slen >= 64) slen = 63;
+                memcpy(sys_tok, arg, (size_t)slen);
+                sys_tok[slen] = '\0';
+
+                total_depth++;
+                if (total_depth > PP_MAX_COND_DEPTH) {
+                    fprintf(stderr,
+                            "[Precompiler] %s:%d: conditional nesting "
+                            "exceeds %d levels\n",
+                            filename, line_num, PP_MAX_COND_DEPTH);
+                    return -1;
+                }
+                if (is_active &&
+                    state->sys != NULL &&
+                    pp_casecmp(sys_tok, state->sys) == 0)
+                    active_depth++;
+
+                if (strbuf_append_char(output, '\n') != 0) return -1;
+            }
+            /* ============================================================
+             *  @ENDIF
+             * ========================================================== */
+            else if (pp_casecmp(directive, "ENDIF") == 0) {
+
+                if (total_depth == 0) {
+                    fprintf(stderr,
+                            "[Precompiler] %s:%d: @ENDIF without matching "
+                            "@IF_ARCH or @IF_SYS\n", filename, line_num);
+                    return -1;
+                }
+                if (active_depth == total_depth)
+                    active_depth--;
+                total_depth--;
+
+                if (strbuf_append_char(output, '\n') != 0) return -1;
+            }
+            /* ============================================================
+             *  Directives processed only in ACTIVE regions
+             * ========================================================== */
+            else if (is_active) {
+
+                /* ---- @IMPORT <path> ----------------------------------- */
+                if (pp_casecmp(directive, "IMPORT") == 0) {
+
+                    /* Parse path — support quoted and unquoted */
+                    char import_path[PP_MAX_PATH_LEN];
+                    int  plen = 0;
+
+                    if (arg < line_end && *arg == '"') {
+                        /* Quoted: @IMPORT "some/path.ua" */
+                        const char *qs = arg + 1;
+                        const char *qe = qs;
+                        while (qe < line_end && *qe != '"') qe++;
+                        if (qe >= line_end) {
+                            fprintf(stderr,
+                                    "[Precompiler] %s:%d: unterminated "
+                                    "quote in @IMPORT\n",
+                                    filename, line_num);
+                            return -1;
+                        }
+                        plen = (int)(qe - qs);
+                        if (plen >= PP_MAX_PATH_LEN)
+                            plen = PP_MAX_PATH_LEN - 1;
+                        memcpy(import_path, qs, (size_t)plen);
+                    } else {
+                        /* Unquoted: @IMPORT some/path.ua */
+                        const char *pe = arg;
+                        while (pe < line_end &&
+                               *pe != ' ' && *pe != '\t' && *pe != ';')
+                            pe++;
+                        plen = (int)(pe - arg);
+                        if (plen >= PP_MAX_PATH_LEN)
+                            plen = PP_MAX_PATH_LEN - 1;
+                        memcpy(import_path, arg, (size_t)plen);
+                    }
+                    import_path[plen] = '\0';
+
+                    if (plen == 0) {
+                        fprintf(stderr,
+                                "[Precompiler] %s:%d: @IMPORT requires "
+                                "a file path\n", filename, line_num);
+                        return -1;
+                    }
+
+                    /* Resolve to a normalised full path */
+                    char resolved[PP_MAX_PATH_LEN];
+                    if (pp_resolve_path(base_dir, import_path,
+                                        resolved, PP_MAX_PATH_LEN) != 0) {
+                        fprintf(stderr,
+                                "[Precompiler] %s:%d: import path "
+                                "too long\n", filename, line_num);
+                        return -1;
+                    }
+
+                    /* Import the file (only if not already imported) */
+                    if (!pp_was_imported(state, resolved)) {
+                        if (pp_mark_imported(state, resolved) != 0)
+                            return -1;
+
+                        char *imp_src = pp_read_file(resolved);
+                        if (!imp_src) {
+                            fprintf(stderr,
+                                    "[Precompiler] %s:%d: failed to import "
+                                    "'%s'\n", filename, line_num, import_path);
+                            return -1;
+                        }
+
+                        /* Compute base dir for the imported file */
+                        char imp_dir[PP_MAX_PATH_LEN];
+                        pp_extract_dir(resolved, imp_dir, PP_MAX_PATH_LEN);
+
+                        fprintf(stderr,
+                                "[Precompiler] Importing '%s'\n", resolved);
+
+                        int rc = pp_process(imp_src, resolved, state,
+                                            imp_dir, depth + 1, output);
+                        free(imp_src);
+                        if (rc != 0) return rc;
+                    } else {
+                        fprintf(stderr,
+                                "[Precompiler] %s:%d: '%s' already imported "
+                                "— skipped\n", filename, line_num,
+                                import_path);
+                    }
+
+                    /* Blank line for the @IMPORT directive itself */
+                    if (strbuf_append_char(output, '\n') != 0) return -1;
+                }
+                /* ---- @DUMMY [message] --------------------------------- */
+                else if (pp_casecmp(directive, "DUMMY") == 0) {
+
+                    /* The rest of the line is the optional message */
+                    const char *msg     = arg;
+                    const char *msg_end = line_end;
+                    /* Trim trailing whitespace */
+                    while (msg_end > msg &&
+                           (*(msg_end - 1) == ' '  ||
+                            *(msg_end - 1) == '\t' ||
+                            *(msg_end - 1) == '\r'))
+                        msg_end--;
+                    int msg_len = (int)(msg_end - msg);
+
+                    if (msg_len > 0) {
+                        fprintf(stderr,
+                                "[Precompiler] DUMMY %s:%d: %.*s\n",
+                                filename, line_num, msg_len, msg);
+                    } else {
+                        fprintf(stderr,
+                                "[Precompiler] DUMMY %s:%d: "
+                                "(no implementation)\n",
+                                filename, line_num);
+                    }
+
+                    /* No code emitted — just a blank line */
+                    if (strbuf_append_char(output, '\n') != 0) return -1;
+                }
+                /* ---- Unknown @-directive ------------------------------ */
+                else {
+                    fprintf(stderr,
+                            "[Precompiler] %s:%d: unknown directive '@%s'\n",
+                            filename, line_num, directive);
+                    return -1;
+                }
+            }
+            /* ---- Inactive region — skip silently ---------------------- */
+            else {
+                if (strbuf_append_char(output, '\n') != 0) return -1;
+            }
+        }
+        /* ================================================================
+         *  Regular (non-directive) line
+         * ============================================================== */
+        else if (is_active) {
+            /* Emit verbatim */
+            if (strbuf_append(output, line_start, line_len) != 0) return -1;
+            if (strbuf_append_char(output, '\n')            != 0) return -1;
+        }
+        else {
+            /* Inactive — blank line placeholder */
+            if (strbuf_append_char(output, '\n') != 0) return -1;
+        }
+
+        line_num++;
+    }
+
+    /* ---- Check for unterminated @IF blocks ---------------------------- */
+    if (total_depth != 0) {
+        fprintf(stderr,
+                "[Precompiler] %s: %d unterminated @IF block(s) — "
+                "missing @ENDIF\n", filename, total_depth);
+        return -1;
+    }
+
+    return 0;
+}
+
+/* =========================================================================
+ *  Public API
+ * ========================================================================= */
+char* preprocess(const char *source,
+                 const char *arch,
+                 const char *sys,
+                 const char *base_dir,
+                 const char *filename)
+{
+    if (!source || !arch) {
+        fprintf(stderr, "[Precompiler] Error: NULL source or arch\n");
+        return NULL;
+    }
+
+    PPState state;
+    pp_state_init(&state, arch, sys);
+
+    StrBuf output;
+    if (strbuf_init(&output) != 0) {
+        fprintf(stderr, "[Precompiler] Error: out of memory\n");
+        return NULL;
+    }
+
+    const char *dir  = (base_dir && *base_dir) ? base_dir : ".";
+    const char *file = (filename && *filename) ? filename : "<input>";
+
+    /* Also mark the main file as imported so it can't import itself */
+    {
+        char main_resolved[PP_MAX_PATH_LEN];
+        if (pp_resolve_path(dir, file,
+                            main_resolved, PP_MAX_PATH_LEN) == 0) {
+            pp_mark_imported(&state, main_resolved);
+        }
+    }
+
+    int rc = pp_process(source, file, &state, dir, 0, &output);
+
+    pp_state_free(&state);
+
+    if (rc != 0) {
+        strbuf_free(&output);
+        return NULL;
+    }
+
+    /* Null-terminate the output */
+    if (strbuf_append_char(&output, '\0') != 0) {
+        strbuf_free(&output);
+        return NULL;
+    }
+
+    /* Detach — caller owns the memory now */
+    return output.data;
+}

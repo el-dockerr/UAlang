@@ -32,6 +32,7 @@ ua program.ua -arch x86 -sys linux    # build a Linux ELF binary
 ## Key Features
 
 - **27-instruction MVIS** — a Minimum Viable Instruction Set covering data movement, arithmetic, bitwise logic, control flow, stack operations, and software interrupts
+- **Precompiler** — `@IF_ARCH`, `@IF_SYS`, `@ENDIF` conditional compilation; `@IMPORT` with once-only file inclusion; `@DUMMY` stub markers
 - **Four backends** — Intel x86-64 (64-bit), Intel x86-32/IA-32 (32-bit), ARM ARMv7-A (32-bit), and Intel 8051/MCS-51 (8-bit embedded)
 - **Four output modes** — raw binary, Windows PE executable, Linux ELF executable, and JIT execution
 - **Two-pass assembly** — full label resolution with forward references
@@ -54,7 +55,7 @@ ua program.ua -arch x86 -sys linux    # build a Linux ELF binary
 ```bash
 cd src
 gcc -std=c99 -Wall -Wextra -pedantic -o ua.exe \
-    main.c lexer.c parser.c codegen.c \
+    main.c lexer.c parser.c codegen.c precompiler.c \
     backend_8051.c backend_x86_64.c backend_x86_32.c backend_arm.c \
     emitter_pe.c emitter_elf.c
 ```
@@ -92,6 +93,7 @@ UA/
 │   └── architecture.md         # Internal design and pipeline
 └── src/
     ├── main.c                  # CLI driver, file I/O, JIT executor
+    ├── precompiler.h/.c        # Preprocessor (@IF_ARCH, @IMPORT, etc.)
     ├── lexer.h / lexer.c       # Tokenizer
     ├── parser.h / parser.c     # IR generator with shape validation
     ├── codegen.h / codegen.c   # Shared code buffer utilities

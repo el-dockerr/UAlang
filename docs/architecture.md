@@ -7,9 +7,10 @@ This document describes the internal design of the UA compiler — its pipeline,
 ## Table of Contents
 
 1. [Pipeline Overview](#pipeline-overview)
-2. [Stage 1: Lexer](#stage-1-lexer)
-3. [Stage 2: Parser / IR](#stage-2-parser--ir)
-4. [Stage 3: Backend Code Generation](#stage-3-backend-code-generation)
+2. [Stage 0: Precompiler](#stage-0-precompiler)
+3. [Stage 1: Lexer](#stage-1-lexer)
+4. [Stage 2: Parser / IR](#stage-2-parser--ir)
+5. [Stage 3: Backend Code Generation](#stage-3-backend-code-generation)
    - [Two-Pass Assembly](#two-pass-assembly)
    - [x86-64 Backend](#x86-64-backend)   - [x86-32 (IA-32) Backend](#x86-32-ia-32-backend)
    - [ARM (ARMv7-A) Backend](#arm-armv7-a-backend)   - [8051 Backend](#8051-backend)
@@ -26,10 +27,17 @@ This document describes the internal design of the UA compiler — its pipeline,
 
 ## Pipeline Overview
 
-UA uses a classic four-stage pipeline. Each stage is a pure function that transforms one representation into the next:
+UA uses a classic five-stage pipeline. Each stage is a pure function that transforms one representation into the next:
 
 ```
  Source Text (.UA)
+       │
+       ▼
+ ┌──────────────┐
+ │ Precompiler  │   preprocess()
+ │ precompiler  │─────────────────► Preprocessed Source Text
+ │    .c        │              (directives evaluated, imports inlined)
+ └──────────────┘
        │
        ▼
  ┌───────────┐
@@ -57,7 +65,49 @@ UA uses a classic four-stage pipeline. Each stage is a pure function that transf
  └───────────────┘
 ```
 
-Each stage is independent: the lexer knows nothing about architectures, the parser knows nothing about machine encodings, and the backends know nothing about file formats.
+Each stage is independent: the precompiler knows nothing about tokens, the lexer knows nothing about architectures, the parser knows nothing about machine encodings, and the backends know nothing about file formats.
+
+---
+
+## Stage 0: Precompiler
+
+**Files:** `precompiler.h`, `precompiler.c`
+
+The precompiler runs before the lexer and performs a text-to-text transformation.  It evaluates `@`-directives and produces a clean source string ready for tokenization.
+
+### Directives
+
+| Directive | Purpose |
+|-----------|--------|
+| `@IF_ARCH <arch>` | Push conditional — include block only when `-arch` matches |
+| `@IF_SYS <system>` | Push conditional — include block only when `-sys` matches |
+| `@ENDIF` | Pop one conditional level |
+| `@IMPORT <path>` | Include another `.ua` file (at most once per unique path) |
+| `@DUMMY [message]` | Emit a stub diagnostic to stderr; no code generated |
+
+### Conditional Nesting
+
+Conditionals use a two-counter scheme:
+
+- **`total_depth`** — incremented on every `@IF_*`, decremented on `@ENDIF`
+- **`active_depth`** — how many nested levels have their condition satisfied
+
+A line is in an *active* region if and only if `active_depth == total_depth`.  This allows arbitrarily nested blocks (up to 64 levels) without a boolean stack.
+
+### Import De-duplication
+
+The precompiler maintains a list of normalised file paths that have been imported.  When `@IMPORT` is encountered:
+
+1. The path is resolved relative to the importing file's directory
+2. Separators are normalised to `/`
+3. If the resolved path is already in the imported list → skip silently
+4. Otherwise → read the file, recursively preprocess it, and append to the output
+
+Import depth is limited to 16 levels to prevent circular references.
+
+### Line Preservation
+
+Directive lines and inactive (conditionally excluded) lines are replaced by blank lines in the output.  This preserves line numbering so that subsequent lexer/parser error messages reference correct line numbers in the original source file.
 
 ---
 
@@ -546,7 +596,9 @@ typedef struct {
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `main.c` | ~470 | CLI parsing, file I/O, JIT execution, output routing |
+| `main.c` | ~500 | CLI parsing, file I/O, JIT execution, output routing |
+| `precompiler.h` | ~50 | Precompiler public API |
+| `precompiler.c` | ~470 | `@`-directive preprocessor (conditionals, imports, stubs) |
 | `lexer.h` | ~80 | Token type enum, `Token` struct, public API |
 | `lexer.c` | ~250 | Tokenizer implementation |
 | `parser.h` | ~110 | Opcode/operand enums, `Instruction` struct, public API |

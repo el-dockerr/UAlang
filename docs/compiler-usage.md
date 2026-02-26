@@ -9,11 +9,12 @@ This document covers building the UA compiler, command-line usage, output format
 1. [Building the Compiler](#building-the-compiler)
 2. [Command-Line Syntax](#command-line-syntax)
 3. [Flags Reference](#flags-reference)
-4. [Output Formats](#output-formats)
-5. [Usage Examples](#usage-examples)
-6. [Exit Codes](#exit-codes)
-7. [Error Messages](#error-messages)
-8. [Troubleshooting](#troubleshooting)
+4. [Precompiler Directives](#precompiler-directives)
+5. [Output Formats](#output-formats)
+6. [Usage Examples](#usage-examples)
+7. [Exit Codes](#exit-codes)
+8. [Error Messages](#error-messages)
+9. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -26,7 +27,7 @@ UA is written in pure C99 with no external dependencies. A single compiler invoc
 ```bash
 cd src
 gcc -std=c99 -Wall -Wextra -pedantic -o UA \
-    main.c lexer.c parser.c codegen.c \
+    main.c lexer.c parser.c codegen.c precompiler.c \
     backend_8051.c backend_x86_64.c backend_x86_32.c backend_arm.c \
     emitter_pe.c emitter_elf.c
 ```
@@ -36,7 +37,7 @@ gcc -std=c99 -Wall -Wextra -pedantic -o UA \
 ```bash
 cd src
 gcc -std=c99 -Wall -Wextra -pedantic -o UA.exe ^
-    main.c lexer.c parser.c codegen.c ^
+    main.c lexer.c parser.c codegen.c precompiler.c ^
     backend_8051.c backend_x86_64.c backend_x86_32.c backend_arm.c ^
     emitter_pe.c emitter_elf.c
 ```
@@ -46,7 +47,7 @@ gcc -std=c99 -Wall -Wextra -pedantic -o UA.exe ^
 ```bash
 cd src
 clang -std=c99 -Wall -Wextra -pedantic -o UA \
-    main.c lexer.c parser.c codegen.c \
+    main.c lexer.c parser.c codegen.c precompiler.c \
     backend_8051.c backend_x86_64.c backend_x86_32.c backend_arm.c \
     emitter_pe.c emitter_elf.c
 ```
@@ -56,12 +57,12 @@ clang -std=c99 -Wall -Wextra -pedantic -o UA \
 ```cmd
 cd src
 cl /std:c11 /W4 /Fe:UA.exe ^
-    main.c lexer.c parser.c codegen.c ^
+    main.c lexer.c parser.c codegen.c precompiler.c ^
     backend_8051.c backend_x86_64.c backend_x86_32.c backend_arm.c ^
     emitter_pe.c emitter_elf.c
 ```
 
-**Source files:** 9 `.c` files, 8 `.h` headers  
+**Source files:** 10 `.c` files, 9 `.h` headers  
 **Output:** `UA` (or `UA.exe` on Windows)  
 **Requirements:** Any C99-conformant compiler
 
@@ -122,6 +123,85 @@ Assembles the code and immediately executes it in memory. Available only with `-
 - On **POSIX**: uses `mmap` with `PROT_READ | PROT_WRITE | PROT_EXEC`
 
 After execution, the return value in RAX (R0) is printed.
+
+---
+
+## Precompiler Directives
+
+Before lexing, the UA precompiler evaluates all lines beginning with `@`.  Directives are processed top-to-bottom, line-by-line.  Blank lines are emitted in place of directives to preserve line numbering for error messages.
+
+### `@IF_ARCH <arch>`
+
+Conditionally include the following lines only when the target architecture matches.  The comparison is **case-insensitive** and matches the value passed to `-arch` exactly.
+
+```asm
+@IF_ARCH x86
+    MOV R0, R1          ; emitted only for -arch x86
+@ENDIF
+
+@IF_ARCH mcs51
+    LDI R0, 0xFF        ; emitted only for -arch mcs51
+@ENDIF
+```
+
+### `@IF_SYS <system>`
+
+Conditionally include the following lines only when the target system matches.  Matches the value passed to `-sys` (case-insensitive).  If `-sys` was not specified, the condition is always **false**.
+
+```asm
+@IF_SYS win32
+    INT #0x21           ; Windows-specific interrupt
+@ENDIF
+
+@IF_SYS linux
+    INT #0x80           ; Linux-specific interrupt
+@ENDIF
+```
+
+### `@ENDIF`
+
+Closes the most recent `@IF_ARCH` or `@IF_SYS` block.  Every `@IF_*` must have a matching `@ENDIF`.
+
+### Nesting
+
+Conditional blocks can be nested up to 64 levels:
+
+```asm
+@IF_ARCH x86
+    @IF_SYS win32
+        ; x86 + Windows only
+    @ENDIF
+@ENDIF
+```
+
+### `@IMPORT <path>`
+
+Include the contents of another `.ua` file at this position.  The imported file is also preprocessed (directives inside it are evaluated).  Each file is imported **at most once** — duplicate `@IMPORT` directives for the same resolved path are silently skipped.
+
+Paths are resolved relative to the importing file's directory.  Both quoted and unquoted forms are accepted:
+
+```asm
+@IMPORT "lib/math.ua"
+@IMPORT utils.ua
+```
+
+Import nesting is limited to 16 levels to prevent circular references.
+
+### `@DUMMY [message]`
+
+Mark a section of code as a stub.  A diagnostic is printed to stderr during compilation.  **No code is emitted.**
+
+```asm
+@DUMMY This function is not yet implemented
+@DUMMY
+```
+
+Output during compilation:
+
+```
+[Precompiler] DUMMY program.ua:12: This function is not yet implemented
+[Precompiler] DUMMY program.ua:13: (no implementation)
+```
 
 ---
 

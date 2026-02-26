@@ -7,8 +7,9 @@ This document is the complete reference for the **Unified Assembly (UA)** instru
 ## Table of Contents
 
 1. [Source File Format](#source-file-format)
-2. [Comments](#comments)
-3. [Labels](#labels)
+2. [Precompiler Directives](#precompiler-directives)
+3. [Comments](#comments)
+4. [Labels](#labels)
 4. [Registers](#registers)
 5. [Numeric Literals](#numeric-literals)
 6. [Instruction Set](#instruction-set)
@@ -43,6 +44,65 @@ This document is the complete reference for the **Unified Assembly (UA)** instru
     ADD  R0, R1
     HLT
 ```
+
+---
+
+## Precompiler Directives
+
+Before lexing, the UA precompiler evaluates lines starting with `@`.  Directives are **not** assembly instructions — they control conditional compilation, file inclusion, and stub markers.
+
+| Directive | Description |
+|-----------|-------------|
+| `@IF_ARCH <arch>` | Begin a conditional block — included only when `-arch` matches |
+| `@IF_SYS <system>` | Begin a conditional block — included only when `-sys` matches |
+| `@ENDIF` | Close the most recent `@IF_ARCH` or `@IF_SYS` block |
+| `@IMPORT <path>` | Include another `.ua` file (each file imported at most once) |
+| `@DUMMY [message]` | Emit a stub diagnostic to stderr; no code generated |
+
+### Conditional Compilation
+
+```asm
+@IF_ARCH x86
+    ; This section is only assembled when -arch x86
+    LDI R0, 42
+@ENDIF
+
+@IF_SYS linux
+    ; This section is only assembled when -sys linux
+    INT #0x80
+@ENDIF
+```
+
+Conditional blocks can be **nested** (up to 64 levels):
+
+```asm
+@IF_ARCH x86
+    @IF_SYS win32
+        ; x86 + Windows only
+    @ENDIF
+@ENDIF
+```
+
+### File Import
+
+```asm
+@IMPORT "lib/utils.ua"
+@IMPORT helpers.ua          ; unquoted form also accepted
+```
+
+- Paths are resolved relative to the **importing file's** directory
+- Each unique file is imported **once** — duplicate `@IMPORT` lines are skipped
+- Imported files are preprocessed recursively (their directives are evaluated)
+- Import nesting is limited to 16 levels
+
+### Stub Markers
+
+```asm
+@DUMMY This feature is not yet implemented
+@DUMMY
+```
+
+Prints a diagnostic to stderr during compilation.  No code is emitted.
 
 ---
 
