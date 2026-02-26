@@ -4,52 +4,153 @@
 ;  I/O functions using system calls.
 ;
 ;  Functions:
-;    print:   Write a string to stdout.
+;    print:   Write a null-terminated string to stdout.
 ;             Input:  R0 = pointer to null-terminated string
 ;             Output: none (R0-R7 may be clobbered)
 ;
-;  Platform notes (x86-64 Linux):
-;    syscall 1 = write(fd, buf, count)
-;    RAX=1, RDI=fd(1=stdout), RSI=buf, RDX=count
-;    UA mapping: R0=RAX, R2=RDX, R6=RSI, R7=RDI
+;  Platform support:
+;    x86    + linux  : syscall 1  (write) via SYSCALL
+;    x86    + win32  : syscall 1  (write) via win32 write_dispatcher
+;    x86_32 + linux  : syscall 4  (write) via INT 0x80
+;    arm    + linux  : syscall 4  (write) via SVC #0
+;    riscv  + linux  : syscall 64 (write) via ECALL
+;    arm64           : not yet supported (syscall register X8 not in UA)
+;    mcs51           : not supported (no OS)
 ;
-;  This library computes string length internally, then issues a write
-;  syscall. It requires the SYS instruction and LOADB for strlen.
+;  Each section computes strlen internally, then issues a write syscall
+;  using the platform's register convention.  Requires SYS and LOADB.
 ; =============================================================================
 
 ; ---------------------------------------------------------------------------
-;  print — write null-terminated string to stdout
+;  x86-64 (Linux and Win32)
 ;
-;  Entry:  R0 = address of null-terminated string
-;  Exit:   all registers may be clobbered
+;  Syscall convention:
+;    RAX (R0) = syscall number (1 = write)
+;    RDI (R7) = fd (1 = stdout)
+;    RSI (R6) = buf pointer
+;    RDX (R2) = byte count
 ;
-;  Note:   Avoids R4 (RSP) and R5 (RBP) which are unsafe on x86-64.
-;          Uses R1 (RCX) for byte load, R0 (RAX) for zero comparison
-;          after saving the string pointer in R6 and R3.
+;  On win32, SYS invokes the write_dispatcher which translates to
+;  WriteFile via kernel32.dll — same register setup as Linux.
+;  Avoids R4 (RSP) and R5 (RBP).
 ; ---------------------------------------------------------------------------
-print:
-    ; Save string pointer in R6 (RSI = buf for syscall)
-    MOV R6, R0
+@IF_ARCH x86
 
-    ; Compute string length → R2 (RDX = count for syscall)
-    LDI R2, 0           ; length counter
-    MOV R3, R0           ; working pointer
-    LDI R0, 0           ; R0 = 0 (null sentinel for comparison)
+print:
+    MOV R6, R0           ; R6 (RSI) = buf pointer for syscall
+    LDI R2, 0            ; R2 (RDX) = length counter
+    MOV R3, R0           ; R3 = working pointer for strlen
+    LDI R0, 0            ; R0 = null sentinel for comparison
 print_strlen:
-    LOADB R1, R3         ; R1 = byte at [R3]  (RCX — safe register)
+    LOADB R1, R3         ; R1 = byte at [R3]
     CMP R1, R0           ; compare with null
-    JZ print_write       ; if null → done counting
+    JZ print_write       ; if null -> done counting
     INC R3               ; next byte
     INC R2               ; increment length
     JMP print_strlen
-
 print_write:
-    ; Set up syscall: write(1, buf, count)
-    ; R0 (RAX) = syscall number (1 = write)
-    ; R7 (RDI) = fd (1 = stdout)
-    ; R6 (RSI) = buf (already set)
-    ; R2 (RDX) = count (already set)
-    LDI R0, 1           ; syscall number: write
-    LDI R7, 1           ; fd: stdout
-    SYS                  ; invoke syscall
+    LDI R0, 1            ; syscall number: write
+    LDI R7, 1            ; fd: stdout
+    SYS                  ; invoke syscall (or win32 dispatcher)
     RET
+
+@ENDIF
+
+; ---------------------------------------------------------------------------
+;  x86-32 (Linux)
+;
+;  Syscall convention (INT 0x80):
+;    EAX (R0) = syscall number (4 = write)
+;    EBX (R3) = fd (1 = stdout)
+;    ECX (R1) = buf pointer
+;    EDX (R2) = byte count
+; ---------------------------------------------------------------------------
+@IF_ARCH x86_32
+@IF_SYS linux
+
+print:
+    MOV R1, R0           ; R1 (ECX) = buf pointer for syscall
+    LDI R2, 0            ; R2 (EDX) = length counter
+    MOV R6, R0           ; R6 = working pointer for strlen
+    LDI R7, 0            ; R7 = null sentinel
+print_strlen:
+    LOADB R0, R6         ; R0 = byte at [R6]
+    CMP R0, R7           ; compare with null
+    JZ print_write       ; if null -> done counting
+    INC R6               ; next byte
+    INC R2               ; increment length
+    JMP print_strlen
+print_write:
+    LDI R0, 4            ; syscall number: write
+    LDI R3, 1            ; fd: stdout (EBX)
+    SYS                  ; INT 0x80
+    RET
+
+@ENDIF
+@ENDIF
+
+; ---------------------------------------------------------------------------
+;  ARM (Linux)
+;
+;  Syscall convention (SVC #0):
+;    r7 (R7) = syscall number (4 = write)
+;    r0 (R0) = fd (1 = stdout)
+;    r1 (R1) = buf pointer
+;    r2 (R2) = byte count
+; ---------------------------------------------------------------------------
+@IF_ARCH arm
+@IF_SYS linux
+
+print:
+    MOV R1, R0           ; R1 = buf pointer for syscall
+    LDI R2, 0            ; R2 = length counter
+    MOV R3, R0           ; R3 = working pointer for strlen
+    LDI R6, 0            ; R6 = null sentinel
+print_strlen:
+    LOADB R0, R3         ; R0 = byte at [R3]
+    CMP R0, R6           ; compare with null
+    JZ print_write       ; if null -> done counting
+    INC R3               ; next byte
+    INC R2               ; increment length
+    JMP print_strlen
+print_write:
+    LDI R7, 4            ; syscall number: write
+    LDI R0, 1            ; fd: stdout
+    SYS                  ; SVC #0
+    RET
+
+@ENDIF
+@ENDIF
+
+; ---------------------------------------------------------------------------
+;  RISC-V (Linux)
+;
+;  Syscall convention (ECALL):
+;    a7 (R7) = syscall number (64 = write)
+;    a0 (R0) = fd (1 = stdout)
+;    a1 (R1) = buf pointer
+;    a2 (R2) = byte count
+; ---------------------------------------------------------------------------
+@IF_ARCH riscv
+@IF_SYS linux
+
+print:
+    MOV R1, R0           ; R1 (a1) = buf pointer for syscall
+    LDI R2, 0            ; R2 (a2) = length counter
+    MOV R3, R0           ; R3 = working pointer for strlen
+    LDI R6, 0            ; R6 = null sentinel
+print_strlen:
+    LOADB R0, R3         ; R0 = byte at [R3]
+    CMP R0, R6           ; compare with null
+    JZ print_write       ; if null -> done counting
+    INC R3               ; next byte
+    INC R2               ; increment length
+    JMP print_strlen
+print_write:
+    LDI R7, 64           ; syscall number: write
+    LDI R0, 1            ; fd: stdout
+    SYS                  ; ECALL
+    RET
+
+@ENDIF
+@ENDIF

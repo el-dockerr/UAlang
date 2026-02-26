@@ -53,15 +53,16 @@ UA uses a classic five-stage pipeline. Each stage is a pure function that transf
        │
        ▼
  ┌───────────────┐
- │   Backend     │   generate_x86_64() / generate_x86_32() / generate_arm() / generate_8051()
- │ backend_*.c   │──────────────► CodeBuffer
- └───────────────┘                (raw machine code bytes)
+ │   Backend     │   generate_x86_64() / generate_x86_32() / generate_arm()
+ │ backend_*.c   │   generate_arm64() / generate_risc_v() / generate_8051()
+ └───────────────┘────────────────► CodeBuffer
+                               (raw machine code bytes)
        │
        ▼
  ┌───────────────┐
- │   Output      │   write_binary() / emit_pe_exe() / emit_elf_exe() / execute_jit()
- │  main.c /     │──────────────► File on disk or JIT execution
- │  emitter_*.c  │
+ │   Output      │   write_binary() / emit_pe_exe() / emit_elf_exe() /
+ │  main.c /     │   emit_macho_exe() / execute_jit()
+ │  emitter_*.c  │──────────────► File on disk or JIT execution
  └───────────────┘
 ```
 
@@ -121,7 +122,7 @@ The lexer performs single-pass, left-to-right scanning of the source text. It pr
 
 | Type | Examples | Description |
 |------|---------|-------------|
-| `TOKEN_OPCODE` | `ADD`, `LDI`, `JMP` | One of the 27 recognized mnemonics |
+| `TOKEN_OPCODE` | `ADD`, `LDI`, `JMP` | One of the 34 recognized mnemonics |
 | `TOKEN_REGISTER` | `R0`, `R15`, `r7` | Register name (case-insensitive) |
 | `TOKEN_NUMBER` | `42`, `0xFF`, `0b1010` | Numeric literal |
 | `TOKEN_LABEL` | `loop:`, `start:` | Label definition (with colon) |
@@ -136,7 +137,7 @@ The lexer performs single-pass, left-to-right scanning of the source text. It pr
 
 1. Skip whitespace (spaces, tabs)
 2. If `;` → consume to end of line, emit `TOKEN_COMMENT`
-3. If letter → read identifier, check against `OPCODES[]` table (27 entries) → emit `TOKEN_OPCODE` or `TOKEN_IDENTIFIER`; if followed by `:`, emit `TOKEN_LABEL`
+3. If letter → read identifier, check against `OPCODES[]` table (34 entries) → emit `TOKEN_OPCODE` or `TOKEN_IDENTIFIER`; if followed by `:`, emit `TOKEN_LABEL`
 4. If digit or `-` → read number (decimal, `0x` hex, `0b` binary) → emit `TOKEN_NUMBER`
 5. If `,` → emit `TOKEN_COMMA`
 6. If `#` → emit `TOKEN_HASH`
@@ -459,6 +460,69 @@ INT #n  →  LCALL (n * 8) + 3
 
 This follows the conventional 8051 interrupt vector table layout where each vector entry starts at address `(n×8)+3`.
 
+### ARM64 (AArch64) Backend
+
+**Files:** `backend_arm64.h`, `backend_arm64.c`
+
+The ARM64 backend generates 64-bit AArch64 machine code. All instructions are exactly 4 bytes (fixed-width), stored little-endian.
+
+#### Register Encoding
+
+```c
+A64_REG_ENC[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+// R0-R7 map directly to X0-X7 (64-bit registers)
+// Scratch registers: X9 (temporary), X10 (secondary scratch for SET imm)
+// X30=LR, X31=SP/XZR are reserved
+```
+
+#### Key Instructions
+
+| UA Instruction | AArch64 Encoding | Notes |
+|----------------|-----------------|-------|
+| `LDI Rd, #imm` | `MOVZ` + `MOVK` | MOVZ for low 16 bits; up to 3× MOVK for higher halfwords |
+| `MOV Rd, Rs` | `MOV Xd, Xn` | ORR with XZR encoding |
+| `ADD Rd, Rs` | `ADD Xd, Xd, Xm` | 64-bit add |
+| `SYS` | `SVC #0` | Supervisor call |
+| `HLT` | `RET` (via X30) | Branch to link register |
+
+#### Immediate Handling
+
+`LDI` uses `MOVZ` for the lowest non-zero 16-bit halfword, followed by up to three `MOVK` instructions for the remaining halfwords. Values 0–65535 are a single 4-byte instruction.
+
+#### Branch Offsets
+
+AArch64 branches use a 26-bit signed offset (in words), giving a range of ±128 MB. Conditional branches (`B.EQ`, `B.NE`) use a 19-bit signed offset (±1 MB).
+
+### RISC-V (RV64I+M) Backend
+
+**Files:** `backend_risc_v.h`, `backend_risc_v.c`
+
+The RISC-V backend generates 64-bit RV64I machine code with the M (multiply/divide) extension. All instructions are 32 bits (4 bytes), stored little-endian.
+
+#### Register Encoding
+
+```c
+RV_REG_ENC[8] = { 10, 11, 12, 13, 14, 15, 16, 17 };
+// R0-R7 map to x10-x17 (a0-a7, the argument/return registers)
+// Scratch registers: t0 (x5), t1 (x6)
+// x0=zero (hardwired), x1=ra, x2=sp are reserved
+```
+
+#### Key Instructions
+
+| UA Instruction | RISC-V Encoding | Notes |
+|----------------|----------------|-------|
+| `LDI Rd, #imm` | `LUI` + `ADDI` | LUI for upper 20 bits, ADDI for lower 12 bits |
+| `MOV Rd, Rs` | `ADDI Rd, Rs, 0` | Pseudo-instruction using ADDI with 0 |
+| `ADD Rd, Rs` | `ADD Rd, Rd, Rs` | R-type instruction |
+| `MUL Rd, Rs` | `MUL Rd, Rd, Rs` | Requires M extension |
+| `SYS` | `ECALL` | Environment call (syscall number in a7 = R7) |
+| `HLT` | `JALR x0, x1, 0` | Return via RA register |
+
+#### Immediate Handling
+
+RISC-V I-type instructions support 12-bit signed immediates. For values that don't fit, the backend uses `LUI` (load upper immediate, 20 bits) combined with `ADDI`. The scratch register `t0` (x5) is used for large immediates in ALU operations.
+
 ---
 
 ## Stage 4: Output
@@ -483,9 +547,21 @@ Offset    Content                  Size
 0x0098    Optional Header (PE32+)  112 bytes
 0x0108    Data Directories         128 bytes (16 entries × 8)
 0x0188    Section Header (.text)   40 bytes
-0x01B0    Padding to 0x200         —
+0x01C8    Section Header (.idata)  40 bytes  (only when imports exist)
+0x01F0    Padding to 0x200         —
 0x0200    .text section (code)     code_size (padded to FileAlignment)
+0x0200+T  .idata section           IDT + ILT + HintName + DLL name + IAT
 ```
+
+When `-sys win32` is specified, the x86-64 backend appends runtime dispatcher stubs and a 32-byte Import Address Table (IAT) to the code. The PE emitter detects this (`code->pe_iat_offset > 0`) and generates a `.idata` section containing:
+
+1. **Import Directory Table (IDT)** — one entry for `kernel32.dll` + null terminator
+2. **Import Lookup Table (ILT)** — pointers to hint/name entries
+3. **Hint/Name entries** — `GetStdHandle`, `WriteFile`, `ExitProcess`
+4. **DLL name** — `kernel32.dll`
+5. **IAT pre-fill** — matching ILT entries, overwritten by the PE loader at runtime
+
+The Import data directory (index 1) in the optional header points to the IDT. The loader resolves the IAT entries at process start, allowing the dispatcher stubs to call Win32 API functions via `CALL [RIP+disp32]` targeting the IAT.
 
 Key fields:
 - **Machine:** `0x8664` (AMD64)
@@ -496,7 +572,7 @@ Key fields:
 - **Subsystem:** `IMAGE_SUBSYSTEM_WINDOWS_CUI` (3 = console)
 - **SizeOfHeaders:** `0x200`
 
-The code is appended after the headers. The final file size is `0x200 + code_size` (rounded up to FileAlignment).
+The code is appended after the headers. The final file size is `0x200 + code_size + idata_size` (each section rounded up to FileAlignment).
 
 ### ELF Emitter
 
@@ -627,13 +703,19 @@ typedef struct {
 | `backend_x86_32.c` | ~700 | Full x86-32 (IA-32) two-pass assembler |
 | `backend_arm.h` | ~70 | `generate_arm()` declaration, ARM register tables |
 | `backend_arm.c` | ~800 | Full ARM (ARMv7-A) two-pass assembler |
+| `backend_arm64.h` | ~80 | `generate_arm64()` declaration, AArch64 register tables |
+| `backend_arm64.c` | ~1500 | Full ARM64 (AArch64) two-pass assembler |
+| `backend_risc_v.h` | ~80 | `generate_risc_v()` declaration, RISC-V register tables |
+| `backend_risc_v.c` | ~1350 | Full RISC-V (RV64I+M) two-pass assembler |
 | `backend_8051.h` | ~40 | Symbol types, `generate_8051()` declaration |
 | `backend_8051.c` | ~970 | Full 8051 two-pass assembler |
 | `emitter_pe.h` | ~15 | `emit_pe_exe()` declaration |
-| `emitter_pe.c` | ~200 | Minimal PE/COFF builder |
+| `emitter_pe.c` | ~350 | PE/COFF builder with optional .idata import table |
 | `emitter_elf.h` | ~45 | `emit_elf_exe()` declaration |
 | `emitter_elf.c` | ~260 | Minimal ELF64 builder |
-| **Total** | **~5,200** | |
+| `emitter_macho.h` | ~15 | `emit_macho_exe()` declaration |
+| `emitter_macho.c` | ~250 | Minimal Mach-O builder |
+| **Total** | **~8,500** | |
 
 ---
 
@@ -662,7 +744,11 @@ Shape tables decouple syntax validation from code generation. The parser validat
 
 ### Why `HLT` = `RET` on x86-64?
 
-In JIT mode, the generated code runs as a function called from C. `HLT` must return to the caller — `RET` is the correct instruction. For PE executables, the OS entry point is a function that returns its exit code in RAX, so `RET` works there too.
+In JIT mode, the generated code runs as a function called from C. `HLT` must return to the caller — `RET` is the correct instruction. For bare PE executables (without `-sys win32`), the OS entry point is a function that returns its exit code in RAX, so `RET` works there too.
+
+When `-sys win32` is specified, the backend replaces `HLT` with a call to the exit dispatcher, which invokes `ExitProcess(0)` via `kernel32.dll`. This ensures clean process termination even without a return address on the stack.
+
+On ARM and ARM64, `HLT` emits `BX LR` / `RET` (branch to link register). On RISC-V, `HLT` emits `JALR x0, ra, 0` (return via RA).
 
 On 8051, `HLT` generates `SJMP $` (infinite self-loop), which is the standard way to halt embedded firmware.
 

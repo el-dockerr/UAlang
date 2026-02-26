@@ -87,9 +87,9 @@ All flags can appear in any order, but the input file must be present.
 | Flag | Argument | Required | Default | Description |
 |------|----------|----------|---------|-------------|
 | *(positional)* | `<input>` | **Yes** | — | Path to the `.UA` source file |
-| `-arch` | `x86` \| `x86_32` \| `arm` \| `mcs51` | **Yes** | — | Target architecture |
+| `-arch` | `x86` \| `x86_32` \| `arm` \| `arm64` \| `riscv` \| `mcs51` | **Yes** | — | Target architecture |
 | `-o` | `<path>` | No | `a.out` or `a.exe` | Output file path |
-| `-sys` | `baremetal` \| `win32` \| `linux` | No | *(none)* | Target operating system |
+| `-sys` | `baremetal` \| `win32` \| `linux` \| `macos` | No | *(none)* | Target operating system |
 | `--run` | — | No | off | JIT-execute the generated code |
 
 ### `-arch` — Target Architecture
@@ -99,6 +99,8 @@ All flags can appear in any order, but the input file must be present.
 | `x86` | Intel x86-64 | 64-bit | Desktop / server processors |
 | `x86_32` | Intel x86-32 (IA-32) | 32-bit | 32-bit x86 processors |
 | `arm` | ARM ARMv7-A | 32-bit | ARM application processors |
+| `arm64` | ARM AArch64 | 64-bit | ARMv8-A 64-bit processors (alias: `aarch64`) |
+| `riscv` | RISC-V RV64I+M | 64-bit | RISC-V 64-bit processors (alias: `rv64`) |
 | `mcs51` | Intel 8051 | 8-bit | Embedded microcontrollers |
 
 ### `-o` — Output File
@@ -108,6 +110,7 @@ Sets the output file path. Defaults:
 - **Without `-sys`:** `a.out`
 - **With `-sys win32`:** `a.exe`
 - **With `-sys linux`:** `a.elf`
+- **With `-sys macos`:** `a.out` (Mach-O)
 
 ### `-sys` — Target System
 
@@ -116,8 +119,9 @@ Sets the output file path. Defaults:
 | `baremetal` | Raw binary output (same as no `-sys`) |
 | `win32` | Wraps code in a Windows PE executable (.exe) |
 | `linux` | Wraps code in a Linux ELF executable |
+| `macos` | Wraps code in a macOS Mach-O executable |
 
-`-sys win32` and `-sys linux` require `-arch x86` or `-arch x86_32`.
+`-sys win32` requires `-arch x86` or `-arch x86_32`. Other `-sys` values work with any architecture that has an appropriate emitter.
 
 ### `--run` — JIT Execution
 
@@ -233,13 +237,23 @@ Produces a minimal 64-bit Windows console application. The PE file includes:
 - PE signature ("PE\0\0")
 - COFF file header (AMD64 machine type)
 - Optional header (PE32+ format, console subsystem)
-- Single `.text` section containing the assembled code
+- `.text` section containing the assembled code
+- `.idata` section with an Import Directory Table (when Win32 API calls are used)
 
 ```bash
 UA program.UA -arch x86 -sys win32 -o program.exe
 ```
 
-The generated `.exe` can be run directly on 64-bit Windows. The process exit code equals the value left in RAX (R0) when `HLT` (`RET`) executes.
+The generated `.exe` can be run directly on 64-bit Windows.
+
+**Win32 mode behaviour:**
+
+When `-sys win32` is specified, the x86-64 backend appends runtime dispatcher stubs after the user code:
+
+- **`HLT`** calls `ExitProcess(0)` via `kernel32.dll` instead of `RET`, ensuring clean process termination.
+- **`SYS`** calls a write dispatcher that translates the Linux syscall register convention (R0=syscall#, R7=fd, R6=buf, R2=count) into `WriteFile` / `GetStdHandle` API calls. This allows the same UA code to work on both Linux and Windows.
+
+The PE emitter automatically generates the `.idata` section with an Import Address Table (IAT) referencing `kernel32.dll` functions: `GetStdHandle`, `WriteFile`, and `ExitProcess`.
 
 **Technical details:**
 - ImageBase: `0x00400000`
@@ -247,6 +261,7 @@ The generated `.exe` can be run directly on 64-bit Windows. The process exit cod
 - FileAlignment: `0x200` (512 bytes)
 - SectionAlignment: `0x1000` (4096 bytes)
 - Subsystem: `IMAGE_SUBSYSTEM_WINDOWS_CUI` (console)
+- Import table: `kernel32.dll` (GetStdHandle, WriteFile, ExitProcess)
 
 ### Linux ELF Executable
 
@@ -481,7 +496,7 @@ Common errors:
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `unknown mnemonic` | Typo in opcode name | Check spelling against the 27 supported opcodes |
+| `unknown mnemonic` | Typo in opcode name | Check spelling against the 34 supported opcodes |
 | `wrong number of operands` | Incorrect operand count | See the operand shape table in the language reference |
 | `expected register` | Non-register where register required | Use `R0`–`R7` |
 | `register out of range` | Register index > 7 | Use R0–R7 only |
@@ -500,7 +515,7 @@ Ensure the file path is correct and the file exists. UA requires the input file 
 
 ### "Unknown architecture"
 
-Supported values: `x86`, `x86_32` (or `ia32`), `arm`, and `mcs51`. The flag is case-insensitive.
+Supported values: `x86`, `x86_32` (or `ia32`), `arm`, `arm64` (or `aarch64`), `riscv` (or `rv64`), and `mcs51`. The flag is case-insensitive.
 
 ### JIT crashes or hangs
 
@@ -509,7 +524,7 @@ Supported values: `x86`, `x86_32` (or `ia32`), `arm`, and `mcs51`. The flag is c
 
 ### PE executable returns wrong exit code
 
-The exit code is the value in R0 (RAX) when `HLT` executes. Windows truncates it to 32 bits and may interpret high values as errors. Stick to 0–255 for predictable results.
+On win32, `HLT` calls `ExitProcess(0)` so the exit code is always 0. For bare PE executables (without `-sys win32`), the exit code is the value in R0 (RAX) when `HLT` executes. Windows truncates it to 32 bits and may interpret high values as errors. Stick to 0–255 for predictable results.
 
 ### 8051 "size mismatch" warning
 

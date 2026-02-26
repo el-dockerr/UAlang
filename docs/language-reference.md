@@ -360,6 +360,36 @@ Register names are **case-insensitive**: `R0`, `r0`, and `R0` are the same regis
 
 All registers are in 8051 register bank 0.
 
+### ARM64 (AArch64) Register Mapping
+
+| UA Register | AArch64 Register | Purpose |
+|-------------|------------------|--------|
+| R0 | X0 | General purpose / return value |
+| R1 | X1 | General purpose |
+| R2 | X2 | General purpose |
+| R3 | X3 | General purpose |
+| R4 | X4 | General purpose |
+| R5 | X5 | General purpose |
+| R6 | X6 | General purpose |
+| R7 | X7 | General purpose |
+
+> **Note:** X9 and X10 are used internally as scratch registers. X30 (LR) and X31 (SP/XZR) are reserved.
+
+### RISC-V (RV64I) Register Mapping
+
+| UA Register | RISC-V Register | ABI Name | Purpose |
+|-------------|-----------------|----------|--------|
+| R0 | x10 | a0 | Argument / return value |
+| R1 | x11 | a1 | Argument |
+| R2 | x12 | a2 | Argument |
+| R3 | x13 | a3 | Argument |
+| R4 | x14 | a4 | Argument |
+| R5 | x15 | a5 | Argument |
+| R6 | x16 | a6 | Argument |
+| R7 | x17 | a7 | Argument / syscall number |
+
+> **Note:** x5 (t0) and x6 (t1) are used internally as scratch registers. x0 (zero, hardwired), x1 (ra), and x2 (sp) are reserved.
+
 ---
 
 ## Numeric Literals
@@ -387,6 +417,8 @@ Immediate values are prefixed with `#` in the instruction:
 | x86-64 | -2,147,483,648 to 2,147,483,647 | 32-bit sign-extended to 64-bit |
 | x86-32 | -2,147,483,648 to 2,147,483,647 | 32-bit native |
 | ARM | -2,147,483,648 to 2,147,483,647 | 32-bit via MOVW/MOVT |
+| ARM64 | -2,147,483,648 to 2,147,483,647 | 32-bit via MOVZ/MOVK (up to 64-bit with multiple MOVK) |
+| RISC-V | -2,147,483,648 to 2,147,483,647 | 32-bit via LUI+ADDI |
 | 8051 | -128 to 255 | 8-bit values |
 
 ---
@@ -437,11 +469,23 @@ When a `@IMPORT` path starts with `std_`, the compiler automatically resolves it
 
 ### std_io
 
-I/O functions for console output (currently targets x86-64 Linux syscalls).
+I/O functions for console output. Uses `@IF_ARCH` / `@IF_SYS` precompiler guards to provide platform-specific implementations.
 
 | Function | Description |
 |----------|-------------|
-| `std_io.print` | Write a null-terminated string to stdout. Pass string address in R0. |
+| `std_io.print` | Write a null-terminated string to stdout. Pass string address in R0. All registers may be clobbered. |
+
+**Supported platforms:**
+
+| Architecture | System | Syscall Convention |
+|-------------|--------|-------------------|
+| x86 | linux | `SYSCALL` — RAX=1 (write), RDI=fd, RSI=buf, RDX=count |
+| x86 | win32 | Write dispatcher translates Linux convention to `WriteFile` API |
+| x86_32 | linux | `INT 0x80` — EAX=4 (write), EBX=fd, ECX=buf, EDX=count |
+| arm | linux | `SVC #0` — R7=4 (write), R0=fd, R1=buf, R2=count |
+| riscv | linux | `ECALL` — a7=64 (write), a0=fd, a1=buf, a2=count |
+
+ARM64 and 8051 are not yet supported (ARM64: syscall register X8 not accessible; 8051: no OS).
 
 ```asm
 @IMPORT std_io
@@ -452,11 +496,13 @@ I/O functions for console output (currently targets x86-64 Linux syscalls).
 
 ### std_string
 
-String manipulation functions.
+String manipulation functions. Uses architecture-neutral MVIS instructions and works on all backends.
 
 | Function | Description |
 |----------|-------------|
-| `std_string.strlen` | Compute the length of a null-terminated string. Pass address in R0, result returned in R1. Clobbers R2, R3. |
+| `std_string.strlen` | Compute the length of a null-terminated string. Pass address in R0, result returned in R1. Clobbers R0, R2, R3. |
+
+> **8051 Note:** `strlen` uses `LOADB` with R0 as the pointer (indirect addressing via `@R0`), which only accesses internal RAM (0x00–0xFF).
 
 ```asm
 @IMPORT std_string
