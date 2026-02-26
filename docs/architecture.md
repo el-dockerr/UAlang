@@ -11,8 +11,8 @@ This document describes the internal design of the UA compiler — its pipeline,
 3. [Stage 2: Parser / IR](#stage-2-parser--ir)
 4. [Stage 3: Backend Code Generation](#stage-3-backend-code-generation)
    - [Two-Pass Assembly](#two-pass-assembly)
-   - [x86-64 Backend](#x86-64-backend)
-   - [8051 Backend](#8051-backend)
+   - [x86-64 Backend](#x86-64-backend)   - [x86-32 (IA-32) Backend](#x86-32-ia-32-backend)
+   - [ARM (ARMv7-A) Backend](#arm-armv7-a-backend)   - [8051 Backend](#8051-backend)
 5. [Stage 4: Output](#stage-4-output)
    - [Raw Binary](#raw-binary)
    - [PE Emitter](#pe-emitter)
@@ -45,7 +45,7 @@ UA uses a classic four-stage pipeline. Each stage is a pure function that transf
        │
        ▼
  ┌───────────────┐
- │   Backend     │   generate_x86_64() / generate_8051()
+ │   Backend     │   generate_x86_64() / generate_x86_32() / generate_arm() / generate_8051()
  │ backend_*.c   │──────────────► CodeBuffer
  └───────────────┘                (raw machine code bytes)
        │
@@ -241,7 +241,111 @@ for (each fixup) {
 
 **SHL/SHR with register:** x86-64 requires the shift count in CL. The backend saves RCX with `PUSH`, moves the shift amount, performs the shift, restores RCX with `POP`, and pads with `NOP` instructions to match the fixed instruction size from pass 1.
 
-### 8051 Backend
+### x86-32 (IA-32) Backend
+
+**Files:** `backend_x86_32.h`, `backend_x86_32.c`
+
+The x86-32 backend generates 32-bit IA-32 machine code. It follows the same two-pass assembly + fixup strategy as the x86-64 backend, but without REX prefixes and with 32-bit operand sizes.
+
+#### Register Encoding
+
+```c
+X32_REG_ENC[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+// R0=EAX, R1=ECX, R2=EDX, R3=EBX, R4=ESP, R5=EBP, R6=ESI, R7=EDI
+```
+
+#### Key Differences from x86-64
+
+| Feature | x86-64 | x86-32 |
+|---------|--------|--------|
+| Operand size | 64-bit (REX.W prefix) | 32-bit (no prefix needed) |
+| `LDI Rd, #imm` | 7 bytes (`REX.W + MOV r64, imm32`) | 5 bytes (`MOV r32, imm32`, `B8+rd`) |
+| `MOV Rd, Rs` | 3 bytes (`REX.W + 89 ModR/M`) | 2 bytes (`89 ModR/M`) |
+| `ADD Rd, Rs` | 3 bytes | 2 bytes |
+| `INC Rd` | 3 bytes (`REX.W FF /0`) | 1 byte (`40+rd`) |
+| `DEC Rd` | 3 bytes (`REX.W FF /1`) | 1 byte (`48+rd`) |
+| `PUSH/POP` | 2 bytes (with REX if needed) | 1 byte (`50+rd`/`58+rd`) |
+| Sign-extend for DIV | `CQO` (REX.W + 99) | `CDQ` (99) |
+
+#### Instruction Sizes
+
+| Instruction | Size (bytes) | Notes |
+|------------|-------|-------|
+| `LDI Rd, #imm` | 5 | `MOV r32, imm32` (`B8+rd`) |
+| `MOV Rd, Rs` | 2 | `89 ModR/M` |
+| `ADD/SUB Rd, Rs` | 2 | Standard ALU r/m32, r32 |
+| `ADD/SUB Rd, #imm` | 6-7 | `81 /0 imm32` or `83 /0 imm8` |
+| `MUL Rd, Rs` | 3 | `IMUL r32, r/m32` (`0F AF`) |
+| `DIV Rd, Rs` | 9 | PUSH EDX + MOV + CDQ + IDIV + MOV + POP EDX |
+| `JMP label` | 5 | `JMP rel32` |
+| `JZ/JNZ label` | 6 | `0F 84/85 rel32` |
+| `INC/DEC Rd` | 1 | Single-byte `40+rd`/`48+rd` |
+| `PUSH/POP Rd` | 1 | Single-byte `50+rd`/`58+rd` |
+| `NOP` | 1 | `90` |
+| `HLT` | 1 | `RET` (`C3`) |
+
+### ARM (ARMv7-A) Backend
+
+**Files:** `backend_arm.h`, `backend_arm.c`
+
+The ARM backend generates 32-bit ARM (ARMv7-A, ARM mode) machine code. All instructions are exactly 4 bytes (fixed-width), stored little-endian.
+
+#### Register Encoding
+
+```c
+ARM_REG_ENC[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+// R0-R7 map directly to ARM r0-r7
+// Scratch register: r12 (IP) for large immediates
+// r13=SP, r14=LR, r15=PC are reserved
+```
+
+#### ARM Instruction Encoding
+
+All instructions use the condition field AL (0xE = always execute) in bits [31:28].
+
+| UA Instruction | ARM Encoding | Notes |
+|----------------|-------------|-------|
+| `LDI Rd, #imm` | `MOVW` + `MOVT` | MOVW for low 16 bits; MOVT for high 16 bits if needed |
+| `MOV Rd, Rs` | `MOV Rd, Rm` | Data processing (opcode 0xD) |
+| `ADD Rd, Rs` | `ADD Rd, Rd, Rm` | Data processing (opcode 0x4) |
+| `SUB Rd, Rs` | `SUB Rd, Rd, Rm` | Data processing (opcode 0x2) |
+| `AND Rd, Rs` | `AND Rd, Rd, Rm` | Data processing (opcode 0x0) |
+| `OR Rd, Rs` | `ORR Rd, Rd, Rm` | Data processing (opcode 0xC) |
+| `XOR Rd, Rs` | `EOR Rd, Rd, Rm` | Data processing (opcode 0x1) |
+| `NOT Rd` | `MVN Rd, Rd` | Data processing (opcode 0xF) |
+| `MUL Rd, Rs` | `MUL Rd, Rd, Rm` | Multiply instruction |
+| `DIV Rd, Rs` | `SDIV Rd, Rd, Rm` | Signed divide (ARMv7VE) |
+| `SHL Rd, #n` | `LSL Rd, Rd, #n` | MOV with barrel shift |
+| `SHR Rd, #n` | `LSR Rd, Rd, #n` | MOV with barrel shift |
+| `CMP Ra, Rb` | `CMP Ra, Rb` | Data processing with S=1 |
+| `JMP label` | `B label` | Branch (cond=AL, 24-bit signed offset) |
+| `JZ label` | `BEQ label` | Branch (cond=EQ) |
+| `JNZ label` | `BNE label` | Branch (cond=NE) |
+| `CALL label` | `BL label` | Branch with Link |
+| `RET` | `BX LR` | Branch and Exchange to return address |
+| `PUSH Rs` | `STR Rs, [SP, #-4]!` | Pre-indexed store with writeback |
+| `POP Rd` | `LDR Rd, [SP], #4` | Post-indexed load |
+| `LOAD Rd, Rs` | `LDR Rd, [Rs]` | Load word |
+| `STORE Rs, Rd` | `STR Rs, [Rd]` | Store word |
+| `INC Rd` | `ADD Rd, Rd, #1` | Add immediate 1 |
+| `DEC Rd` | `SUB Rd, Rd, #1` | Subtract immediate 1 |
+| `NOP` | `MOV R0, R0` | Canonical ARM NOP (0xE1A00000) |
+| `HLT` | `BX LR` | Return to caller |
+| `INT #n` | `SVC #n` | Supervisor Call |
+
+#### Immediate Handling
+
+ARM data-processing instructions can encode an 8-bit immediate rotated right by an even number (0, 2, 4, ..., 30). If a value fits this scheme, it is encoded inline. Otherwise, the backend loads the value into the scratch register r12 (IP) using `MOVW`/`MOVT` and uses the register form.
+
+`LDI` always uses `MOVW` for the low 16 bits, adding `MOVT` for the high 16 bits if non-zero. This means `LDI` is 4 bytes for values 0–65535 and 8 bytes for larger values.
+
+#### Branch Offset Calculation
+
+ARM branches use a 24-bit signed offset (in words, not bytes), relative to PC+8 (due to the ARM pipeline). The backend calculates: `offset24 = (target - (instr_addr + 8)) >> 2`. This gives a range of ±32 MB.
+
+#### Symbol Table
+
+The ARM backend uses an `ARMSymTab` structure with up to 256 symbols and 256 fixups. Branch fixups store the condition code and link flag, allowing the correct branch instruction to be patched after all labels are resolved.
 
 **Files:** `backend_8051.h`, `backend_8051.c`
 
@@ -451,13 +555,17 @@ typedef struct {
 | `codegen.c` | ~100 | Code buffer management, hex dump |
 | `backend_x86_64.h` | ~15 | `generate_x86_64()` declaration |
 | `backend_x86_64.c` | ~700 | Full x86-64 two-pass assembler with 20+ emit helpers |
+| `backend_x86_32.h` | ~50 | `generate_x86_32()` declaration, register tables |
+| `backend_x86_32.c` | ~700 | Full x86-32 (IA-32) two-pass assembler |
+| `backend_arm.h` | ~70 | `generate_arm()` declaration, ARM register tables |
+| `backend_arm.c` | ~800 | Full ARM (ARMv7-A) two-pass assembler |
 | `backend_8051.h` | ~40 | Symbol types, `generate_8051()` declaration |
 | `backend_8051.c` | ~970 | Full 8051 two-pass assembler |
 | `emitter_pe.h` | ~15 | `emit_pe_exe()` declaration |
 | `emitter_pe.c` | ~200 | Minimal PE/COFF builder |
 | `emitter_elf.h` | ~45 | `emit_elf_exe()` declaration |
 | `emitter_elf.c` | ~260 | Minimal ELF64 builder |
-| **Total** | **~3,600** | |
+| **Total** | **~5,200** | |
 
 ---
 

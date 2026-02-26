@@ -1,7 +1,7 @@
 /*
  * =============================================================================
  *  UA - Unified Assembler
- *  Phase 5: CLI, File I/O, x86-64 Backend & JIT Execution
+ *  Phase 5: CLI, File I/O, Multi-Backend & JIT Execution
  *
  *  File:    main.c
  *  Purpose: CLI compiler driver with JIT support.
@@ -9,8 +9,8 @@
  *   Usage:  ua <input.ua> -arch <arch> [-o output] [-sys system] [--run]
  *
  *   -o      Output file path      (default: a.out)
- *   -arch   Target architecture   (mcs51 | x86)        [mandatory]
- *   -sys    Target OS / system    (baremetal | win32 | linux)  [stored]
+ *   -arch   Target architecture   (mcs51 | x86 | x86_32 | arm) [mandatory]
+ *   -sys    Target OS / system    (baremetal | win32 | linux)    [stored]
  *   --run   JIT-execute the code  (x86 only, skips .bin write)
  *
  *  Pipeline:
@@ -19,7 +19,8 @@
  *
  *  Build:  gcc -std=c99 -Wall -Wextra -pedantic -o ua.exe \
  *              main.c lexer.c parser.c codegen.c backend_8051.c \
- *              backend_x86_64.c emitter_pe.c emitter_elf.c
+ *              backend_x86_64.c backend_x86_32.c backend_arm.c \
+ *              emitter_pe.c emitter_elf.c
  *
  *  License: MIT
  * =============================================================================
@@ -34,6 +35,8 @@
 #include "codegen.h"
 #include "backend_8051.h"
 #include "backend_x86_64.h"
+#include "backend_x86_32.h"
+#include "backend_arm.h"
 #include "emitter_pe.h"
 #include "emitter_elf.h"
 
@@ -70,7 +73,7 @@ static void usage(const char *progname)
         "  %s <input.ua> -arch <architecture> [-o <output>] [-sys <system>] [--run]\n\n"
         "Required:\n"
         "  <input.ua>       Path to the UA source file\n"
-        "  -arch <arch>      Target architecture: mcs51, x86\n\n"
+        "  -arch <arch>      Target architecture: mcs51, x86, x86_32, arm\n\n"
         "Optional:\n"
         "  -o <output>       Output file path (default: a.out)\n"
         "  -sys <system>     Target system:  baremetal, win32, linux\n"
@@ -474,9 +477,92 @@ int main(int argc, char *argv[])
             free_code_buffer(code);
         }
     }
+    else if (str_casecmp_portable(cfg.arch, "x86_32") == 0 ||
+             str_casecmp_portable(cfg.arch, "ia32") == 0) {
+        /* ---- x86-32 (IA-32) backend ---------------------------------- */
+        if (cfg.run) {
+            fprintf(stderr, "Error: --run is only supported for -arch x86.\n");
+            rc = EXIT_FAILURE;
+        } else {
+            CodeBuffer *code = generate_x86_32(ir, ir_count);
+            if (!code) {
+                fprintf(stderr, "Error: x86-32 code generation failed.\n");
+                rc = EXIT_FAILURE;
+            } else {
+                fprintf(stderr, "\n");
+                hexdump(code->bytes, code->size);
+
+                if (cfg.sys != NULL &&
+                    str_casecmp_portable(cfg.sys, "win32") == 0) {
+                    const char *pe_out = cfg.output_file;
+                    if (strcmp(pe_out, "a.out") == 0) {
+                        pe_out = "a.exe";
+                    }
+                    if (emit_pe_exe(pe_out, code) != 0) {
+                        rc = EXIT_FAILURE;
+                    }
+                }
+                else if (cfg.sys != NULL &&
+                         str_casecmp_portable(cfg.sys, "linux") == 0) {
+                    const char *elf_out = cfg.output_file;
+                    if (strcmp(elf_out, "a.out") == 0) {
+                        elf_out = "a.elf";
+                    }
+                    if (emit_elf_exe(elf_out, code) != 0) {
+                        rc = EXIT_FAILURE;
+                    }
+                }
+                else {
+                    if (write_binary(cfg.output_file, code->bytes, code->size) != 0) {
+                        rc = EXIT_FAILURE;
+                    } else {
+                        fprintf(stderr, "\nWrote %d bytes to %s\n",
+                                code->size, cfg.output_file);
+                    }
+                }
+                free_code_buffer(code);
+            }
+        }
+    }
+    else if (str_casecmp_portable(cfg.arch, "arm") == 0) {
+        /* ---- ARM (ARMv7-A) backend ------------------------------------ */
+        if (cfg.run) {
+            fprintf(stderr, "Error: --run is only supported for -arch x86.\n");
+            rc = EXIT_FAILURE;
+        } else {
+            CodeBuffer *code = generate_arm(ir, ir_count);
+            if (!code) {
+                fprintf(stderr, "Error: ARM code generation failed.\n");
+                rc = EXIT_FAILURE;
+            } else {
+                fprintf(stderr, "\n");
+                hexdump(code->bytes, code->size);
+
+                if (cfg.sys != NULL &&
+                    str_casecmp_portable(cfg.sys, "linux") == 0) {
+                    const char *elf_out = cfg.output_file;
+                    if (strcmp(elf_out, "a.out") == 0) {
+                        elf_out = "a.elf";
+                    }
+                    if (emit_elf_exe(elf_out, code) != 0) {
+                        rc = EXIT_FAILURE;
+                    }
+                }
+                else {
+                    if (write_binary(cfg.output_file, code->bytes, code->size) != 0) {
+                        rc = EXIT_FAILURE;
+                    } else {
+                        fprintf(stderr, "\nWrote %d bytes to %s\n",
+                                code->size, cfg.output_file);
+                    }
+                }
+                free_code_buffer(code);
+            }
+        }
+    }
     else {
         fprintf(stderr, "Error: unknown architecture '%s'.\n", cfg.arch);
-        fprintf(stderr, "Supported architectures: mcs51, x86\n");
+        fprintf(stderr, "Supported architectures: mcs51, x86, x86_32, arm\n");
         rc = EXIT_FAILURE;
     }
 

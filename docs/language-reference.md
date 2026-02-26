@@ -91,6 +91,8 @@ UA provides 16 virtual registers named `R0` through `R15`. The actual number of 
 | Backend | Usable Registers | Notes |
 |---------|-------------------|-------|
 | x86-64 | R0–R7 (8) | R8–R15 rejected (would require REX.B encoding) |
+| x86-32 | R0–R7 (8) | Maps to IA-32 32-bit registers |
+| ARM | R0–R7 (8) | Maps directly to ARM r0–r7; r12 used as scratch |
 | 8051 | R0–R7 (8) | Maps to bank-0 registers |
 
 Register names are **case-insensitive**: `R0`, `r0`, and `R0` are the same register.
@@ -109,6 +111,36 @@ Register names are **case-insensitive**: `R0`, `r0`, and `R0` are the same regis
 | R7 | RDI | General purpose |
 
 > **Warning:** R4 (RSP) and R5 (RBP) are the stack and base pointers. Modifying them directly can corrupt the stack.
+
+### x86-32 (IA-32) Register Mapping
+
+| UA Register | x86-32 Register | Purpose |
+|-------------|------------------|--------|
+| R0 | EAX | Accumulator / return value |
+| R1 | ECX | General purpose |
+| R2 | EDX | General purpose |
+| R3 | EBX | General purpose (callee-saved) |
+| R4 | ESP | Stack pointer |
+| R5 | EBP | Base pointer |
+| R6 | ESI | General purpose |
+| R7 | EDI | General purpose |
+
+> **Warning:** R4 (ESP) and R5 (EBP) are the stack and base pointers. Modifying them directly can corrupt the stack.
+
+### ARM (ARMv7-A) Register Mapping
+
+| UA Register | ARM Register | Purpose |
+|-------------|--------------|--------|
+| R0 | r0 | General purpose / return value |
+| R1 | r1 | General purpose |
+| R2 | r2 | General purpose |
+| R3 | r3 | General purpose |
+| R4 | r4 | General purpose |
+| R5 | r5 | General purpose |
+| R6 | r6 | General purpose |
+| R7 | r7 | General purpose |
+
+> **Note:** ARM r12 (IP) is used internally as a scratch register for large immediates. r13 (SP), r14 (LR), and r15 (PC) are reserved and cannot be used as UA registers.
 
 ### 8051 Register Mapping
 
@@ -150,6 +182,8 @@ Immediate values are prefixed with `#` in the instruction:
 | Backend | Immediate Range | Notes |
 |---------|----------------|-------|
 | x86-64 | -2,147,483,648 to 2,147,483,647 | 32-bit sign-extended to 64-bit |
+| x86-32 | -2,147,483,648 to 2,147,483,647 | 32-bit native |
+| ARM | -2,147,483,648 to 2,147,483,647 | 32-bit via MOVW/MOVT |
 | 8051 | -128 to 255 | 8-bit values |
 
 ---
@@ -367,6 +401,35 @@ Incorrect operand shapes produce a compile-time error with the source line numbe
 - `SHL`/`SHR` with a register operand saves/restores RCX (shift amount must be in CL)
 - `LOAD`/`STORE` handle the RSP (SIB byte) and RBP (displacement byte) special cases
 - `HLT` emits `RET` (0xC3) — returns control to the JIT runner or OS
+
+### x86-32 (IA-32)
+
+- All operations are 32-bit (no REX prefix)
+- `LDI` uses `MOV r32, imm32` (5 bytes, `B8+rd`)
+- `INC`/`DEC` use the single-byte encodings `40+rd`/`48+rd` (not available in 64-bit mode)
+- `PUSH`/`POP` use single-byte encodings `50+rd`/`58+rd`
+- `DIV` is signed (`IDIV`) using `CDQ` for sign extension (instead of `CQO`)
+- `SHL`/`SHR` with a register operand saves/restores ECX
+- `LOAD`/`STORE` handle the ESP (SIB byte) and EBP (displacement byte) special cases
+- `HLT` emits `RET` (0xC3)
+- No JIT support — use `-arch x86` for JIT execution
+
+### ARM (ARMv7-A)
+
+- All instructions are 32-bit fixed width (4 bytes each)
+- All instructions use condition code AL (always execute)
+- `LDI` uses `MOVW` for values 0–65535 (4 bytes); adds `MOVT` for larger values (8 bytes total)
+- ALU instructions with immediates: if the value fits in ARM’s rotated-imm8 encoding, it is encoded inline; otherwise, the value is loaded into r12 (scratch) first
+- `MUL` uses the ARM `MUL` instruction; `DIV` uses `SDIV` (requires ARMv7VE / integer divide extension)
+- `SHL`/`SHR` use barrel-shifted MOV (`LSL`/`LSR`)
+- `JMP`/`JZ`/`JNZ`/`CALL` use ARM branch instructions with 24-bit signed offsets (±32 MB range)
+- Branch offsets account for the ARM pipeline (PC+8)
+- `RET` and `HLT` emit `BX LR` (branch to link register)
+- `INT #n` emits `SVC #n` (supervisor call)
+- `PUSH` emits `STR Rd, [SP, #-4]!` (pre-indexed store with writeback)
+- `POP` emits `LDR Rd, [SP], #4` (post-indexed load)
+- `NOP` emits the canonical `MOV R0, R0` (0xE1A00000)
+- No JIT support on x86 hosts — use for cross-compilation only
 
 ### 8051/MCS-51
 

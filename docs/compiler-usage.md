@@ -27,7 +27,8 @@ UA is written in pure C99 with no external dependencies. A single compiler invoc
 cd src
 gcc -std=c99 -Wall -Wextra -pedantic -o UA \
     main.c lexer.c parser.c codegen.c \
-    backend_8051.c backend_x86_64.c emitter_pe.c emitter_elf.c
+    backend_8051.c backend_x86_64.c backend_x86_32.c backend_arm.c \
+    emitter_pe.c emitter_elf.c
 ```
 
 ### GCC on Windows (producing UA.exe)
@@ -36,7 +37,8 @@ gcc -std=c99 -Wall -Wextra -pedantic -o UA \
 cd src
 gcc -std=c99 -Wall -Wextra -pedantic -o UA.exe ^
     main.c lexer.c parser.c codegen.c ^
-    backend_8051.c backend_x86_64.c emitter_pe.c emitter_elf.c
+    backend_8051.c backend_x86_64.c backend_x86_32.c backend_arm.c ^
+    emitter_pe.c emitter_elf.c
 ```
 
 ### Clang
@@ -45,7 +47,8 @@ gcc -std=c99 -Wall -Wextra -pedantic -o UA.exe ^
 cd src
 clang -std=c99 -Wall -Wextra -pedantic -o UA \
     main.c lexer.c parser.c codegen.c \
-    backend_8051.c backend_x86_64.c emitter_pe.c emitter_elf.c
+    backend_8051.c backend_x86_64.c backend_x86_32.c backend_arm.c \
+    emitter_pe.c emitter_elf.c
 ```
 
 ### MSVC
@@ -54,10 +57,11 @@ clang -std=c99 -Wall -Wextra -pedantic -o UA \
 cd src
 cl /std:c11 /W4 /Fe:UA.exe ^
     main.c lexer.c parser.c codegen.c ^
-    backend_8051.c backend_x86_64.c emitter_pe.c emitter_elf.c
+    backend_8051.c backend_x86_64.c backend_x86_32.c backend_arm.c ^
+    emitter_pe.c emitter_elf.c
 ```
 
-**Source files:** 7 `.c` files, 6 `.h` headers  
+**Source files:** 9 `.c` files, 8 `.h` headers  
 **Output:** `UA` (or `UA.exe` on Windows)  
 **Requirements:** Any C99-conformant compiler
 
@@ -78,7 +82,7 @@ All flags can appear in any order, but the input file must be present.
 | Flag | Argument | Required | Default | Description |
 |------|----------|----------|---------|-------------|
 | *(positional)* | `<input>` | **Yes** | — | Path to the `.UA` source file |
-| `-arch` | `x86` \| `mcs51` | **Yes** | — | Target architecture |
+| `-arch` | `x86` \| `x86_32` \| `arm` \| `mcs51` | **Yes** | — | Target architecture |
 | `-o` | `<path>` | No | `a.out` or `a.exe` | Output file path |
 | `-sys` | `baremetal` \| `win32` \| `linux` | No | *(none)* | Target operating system |
 | `--run` | — | No | off | JIT-execute the generated code |
@@ -88,6 +92,8 @@ All flags can appear in any order, but the input file must be present.
 | Value | Architecture | Word Size | Description |
 |-------|-------------|-----------|-------------|
 | `x86` | Intel x86-64 | 64-bit | Desktop / server processors |
+| `x86_32` | Intel x86-32 (IA-32) | 32-bit | 32-bit x86 processors |
+| `arm` | ARM ARMv7-A | 32-bit | ARM application processors |
 | `mcs51` | Intel 8051 | 8-bit | Embedded microcontrollers |
 
 ### `-o` — Output File
@@ -106,7 +112,7 @@ Sets the output file path. Defaults:
 | `win32` | Wraps code in a Windows PE executable (.exe) |
 | `linux` | Wraps code in a Linux ELF executable |
 
-`-sys win32` and `-sys linux` require `-arch x86`.
+`-sys win32` and `-sys linux` require `-arch x86` or `-arch x86_32`.
 
 ### `--run` — JIT Execution
 
@@ -292,11 +298,47 @@ loop:
 ```
 
 ```bash
-UA blink.UA -arch mcs51 -o blink.bin
+UA firmware.UA -arch mcs51 -o blink.bin
 # Produces a raw binary for flashing to an 8051 chip
 ```
 
-### Example 6: Bitwise Operations
+### Example 6: Cross-compile for ARM
+
+```asm
+; armadd.UA — simple addition on ARM
+    LDI  R0, 10
+    LDI  R1, 5
+    ADD  R0, R1
+    HLT
+```
+
+```bash
+UA armadd.UA -arch arm -o armadd.bin
+# Produces a raw ARM binary
+
+UA armadd.UA -arch arm -sys linux -o armadd.elf
+# Produces a Linux ELF executable for ARM
+```
+
+### Example 7: Cross-compile for x86-32
+
+```asm
+; calc32.UA — arithmetic on 32-bit x86
+    LDI  R0, 100
+    LDI  R1, 50
+    ADD  R0, R1
+    HLT
+```
+
+```bash
+UA calc32.UA -arch x86_32 -o calc32.bin
+# Produces raw 32-bit x86 machine code
+
+UA calc32.UA -arch x86_32 -sys win32 -o calc32.exe
+# Produces a 32-bit Windows PE executable
+```
+
+### Example 8: Bitwise Operations
 
 ```asm
 ; bits.UA — mask, set, toggle, and complement
@@ -308,7 +350,7 @@ UA blink.UA -arch mcs51 -o blink.bin
     HLT
 ```
 
-### Example 7: Build a Linux ELF Executable
+### Example 9: Build a Linux ELF Executable
 
 ```asm
 ; answer.UA — return 42 as exit code
@@ -374,7 +416,7 @@ Ensure the file path is correct and the file exists. UA requires the input file 
 
 ### "Unknown architecture"
 
-Only `x86` and `mcs51` are supported. The flag is case-sensitive.
+Supported values: `x86`, `x86_32` (or `ia32`), `arm`, and `mcs51`. The flag is case-insensitive.
 
 ### JIT crashes or hangs
 

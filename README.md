@@ -21,16 +21,18 @@ UA introduces a **hardware-neutral assembly dialect** with a clean, consistent s
 ```
 
 ```bash
-ua program.ua -arch x86 --run       # JIT-execute on your PC
-ua program.ua -arch mcs51 -o fw.bin  # cross-compile for 8051
-ua program.ua -arch x86 -sys win32   # build a Windows .exe
-ua program.ua -arch x86 -sys linux   # build a Linux ELF binary
+ua program.ua -arch x86 --run        # JIT-execute on your PC
+ua program.ua -arch mcs51 -o fw.bin   # cross-compile for 8051
+ua program.ua -arch x86_32 -o fw.bin  # compile for IA-32 (32-bit x86)
+ua program.ua -arch arm -o fw.bin     # compile for ARM (ARMv7-A)
+ua program.ua -arch x86 -sys win32    # build a Windows .exe
+ua program.ua -arch x86 -sys linux    # build a Linux ELF binary
 ```
 
 ## Key Features
 
 - **27-instruction MVIS** — a Minimum Viable Instruction Set covering data movement, arithmetic, bitwise logic, control flow, stack operations, and software interrupts
-- **Two backends** — Intel x86-64 (64-bit) and Intel 8051/MCS-51 (8-bit embedded)
+- **Four backends** — Intel x86-64 (64-bit), Intel x86-32/IA-32 (32-bit), ARM ARMv7-A (32-bit), and Intel 8051/MCS-51 (8-bit embedded)
 - **Four output modes** — raw binary, Windows PE executable, Linux ELF executable, and JIT execution
 - **Two-pass assembly** — full label resolution with forward references
 - **Pure C99** — zero dependencies, no external libraries, builds with a single `gcc` command
@@ -41,6 +43,8 @@ ua program.ua -arch x86 -sys linux   # build a Linux ELF binary
 | Target | Flag | Registers | Output Formats |
 |--------|------|-----------|----------------|
 | **x86-64** | `-arch x86` | R0–R7 → RAX, RCX, RDX, RBX, RSP, RBP, RSI, RDI | Raw binary, PE .exe, ELF, JIT |
+| **x86-32 (IA-32)** | `-arch x86_32` | R0–R7 → EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI | Raw binary, PE .exe, ELF |
+| **ARM (ARMv7-A)** | `-arch arm` | R0–R7 → r0–r7 | Raw binary, ELF |
 | **8051/MCS-51** | `-arch mcs51` | R0–R7 → 8051 bank-0 registers | Raw binary |
 
 ## Quick Start
@@ -51,7 +55,8 @@ ua program.ua -arch x86 -sys linux   # build a Linux ELF binary
 cd src
 gcc -std=c99 -Wall -Wextra -pedantic -o ua.exe \
     main.c lexer.c parser.c codegen.c \
-    backend_8051.c backend_x86_64.c emitter_pe.c emitter_elf.c
+    backend_8051.c backend_x86_64.c backend_x86_32.c backend_arm.c \
+    emitter_pe.c emitter_elf.c
 ```
 
 ### Run
@@ -62,6 +67,12 @@ gcc -std=c99 -Wall -Wextra -pedantic -o ua.exe \
 
 # Cross-compile for 8051
 ./ua firmware.ua -arch mcs51 -o firmware.bin
+
+# Compile for 32-bit x86 (IA-32)
+./ua program.ua -arch x86_32 -o program.bin
+
+# Compile for ARM (ARMv7-A)
+./ua firmware.ua -arch arm -o firmware.bin
 
 # Build a standalone Windows executable
 ./ua program.ua -arch x86 -sys win32 -o program.exe
@@ -85,6 +96,8 @@ UA/
     ├── parser.h / parser.c     # IR generator with shape validation
     ├── codegen.h / codegen.c   # Shared code buffer utilities
     ├── backend_x86_64.h/.c     # x86-64 native code generator
+    ├── backend_x86_32.h/.c     # x86-32 (IA-32) native code generator
+    ├── backend_arm.h/.c        # ARM (ARMv7-A) native code generator
     ├── backend_8051.h/.c       # 8051/MCS-51 native code generator
     ├── emitter_pe.h/.c         # Windows PE executable emitter
     └── emitter_elf.h/.c        # Linux ELF executable emitter
