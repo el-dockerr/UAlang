@@ -45,20 +45,23 @@
 /*  0x14  IDT[1]          20 bytes   (null terminator)                     */
 /*  0x28  ILT[0]           8 bytes   → HintName GetStdHandle               */
 /*  0x30  ILT[1]           8 bytes   → HintName WriteFile                  */
-/*  0x38  ILT[2]           8 bytes   → HintName ExitProcess                */
-/*  0x40  ILT[3]           8 bytes   (null terminator)                     */
-/*  0x48  HN_GetStdHandle 16 bytes   (2 hint + "GetStdHandle\0" + 1 pad)  */
-/*  0x58  HN_WriteFile    12 bytes   (2 hint + "WriteFile\0" + 1 pad)     */
-/*  0x64  HN_ExitProcess  14 bytes   (2 hint + "ExitProcess\0" + 1 pad)   */
-/*  0x72  DLL name        13 bytes   "kernel32.dll\0"                      */
-/*  Total: 0x7F = 127 bytes                                               */
+/*  0x38  ILT[2]           8 bytes   → HintName ReadFile                   */
+/*  0x40  ILT[3]           8 bytes   → HintName ExitProcess                */
+/*  0x48  ILT[4]           8 bytes   (null terminator)                     */
+/*  0x50  HN_GetStdHandle 16 bytes   (2 hint + "GetStdHandle\0" + 1 pad)  */
+/*  0x60  HN_WriteFile    12 bytes   (2 hint + "WriteFile\0" + 1 pad)     */
+/*  0x6C  HN_ReadFile     12 bytes   (2 hint + "ReadFile\0" + 2 pad)      */
+/*  0x78  HN_ExitProcess  14 bytes   (2 hint + "ExitProcess\0" + 1 pad)   */
+/*  0x86  DLL name        13 bytes   "kernel32.dll\0"                      */
+/*  Total: 0x93 = 147 bytes                                               */
 #define IDATA_IDT_OFF     0x00
 #define IDATA_ILT_OFF     0x28
-#define IDATA_HN0_OFF     0x48   /* GetStdHandle */
-#define IDATA_HN1_OFF     0x58   /* WriteFile    */
-#define IDATA_HN2_OFF     0x64   /* ExitProcess  */
-#define IDATA_DLL_OFF     0x72   /* DLL name     */
-#define IDATA_RAW_SIZE    0x7F   /* 127 bytes    */
+#define IDATA_HN0_OFF     0x50   /* GetStdHandle */
+#define IDATA_HN1_OFF     0x60   /* WriteFile    */
+#define IDATA_HN2_OFF     0x6C   /* ReadFile     */
+#define IDATA_HN3_OFF     0x78   /* ExitProcess  */
+#define IDATA_DLL_OFF     0x86   /* DLL name     */
+#define IDATA_RAW_SIZE    0x93   /* 147 bytes    */
 
 /* =========================================================================
  *  Align helper
@@ -286,9 +289,13 @@ int emit_pe_exe(const char *filename, const CodeBuffer *code)
         write_le16(id + IDATA_HN1_OFF, 0);
         memcpy(id + IDATA_HN1_OFF + 2, "WriteFile", 10);
 
-        /* ExitProcess: hint=0, name="ExitProcess\0" */
+        /* ReadFile: hint=0, name="ReadFile\0" */
         write_le16(id + IDATA_HN2_OFF, 0);
-        memcpy(id + IDATA_HN2_OFF + 2, "ExitProcess", 12);
+        memcpy(id + IDATA_HN2_OFF + 2, "ReadFile", 9);
+
+        /* ExitProcess: hint=0, name="ExitProcess\0" */
+        write_le16(id + IDATA_HN3_OFF, 0);
+        memcpy(id + IDATA_HN3_OFF + 2, "ExitProcess", 12);
 
         /* DLL name */
         memcpy(id + IDATA_DLL_OFF, "kernel32.dll", 13);
@@ -297,7 +304,8 @@ int emit_pe_exe(const char *filename, const CodeBuffer *code)
         write_le64(id + IDATA_ILT_OFF + 0,  (uint64_t)(idata_rva + IDATA_HN0_OFF));
         write_le64(id + IDATA_ILT_OFF + 8,  (uint64_t)(idata_rva + IDATA_HN1_OFF));
         write_le64(id + IDATA_ILT_OFF + 16, (uint64_t)(idata_rva + IDATA_HN2_OFF));
-        write_le64(id + IDATA_ILT_OFF + 24, 0);  /* null terminator */
+        write_le64(id + IDATA_ILT_OFF + 24, (uint64_t)(idata_rva + IDATA_HN3_OFF));
+        write_le64(id + IDATA_ILT_OFF + 32, 0);  /* null terminator */
 
         /* ---- Import Directory Table (IDT) ----------------------------- */
         uint8_t *idt = id + IDATA_IDT_OFF;
@@ -315,7 +323,8 @@ int emit_pe_exe(const char *filename, const CodeBuffer *code)
         write_le64(iat + 0,  (uint64_t)(idata_rva + IDATA_HN0_OFF));
         write_le64(iat + 8,  (uint64_t)(idata_rva + IDATA_HN1_OFF));
         write_le64(iat + 16, (uint64_t)(idata_rva + IDATA_HN2_OFF));
-        write_le64(iat + 24, 0);  /* null terminator */
+        write_le64(iat + 24, (uint64_t)(idata_rva + IDATA_HN3_OFF));
+        write_le64(iat + 32, 0);  /* null terminator */
     }
 
     /* ====================================================================

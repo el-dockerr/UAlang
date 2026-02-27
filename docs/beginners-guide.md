@@ -22,7 +22,8 @@ Welcome to **Unified Assembly (UA)** — a portable assembly language that lets 
 10. [Conditional Compilation](#conditional-compilation)
 11. [Common Patterns](#common-patterns)
 12. [Architecture-Specific Code](#architecture-specific-code)
-13. [What to Read Next](#what-to-read-next)
+13. [Standard Libraries and Cross-Platform I/O](#standard-libraries-and-cross-platform-io)
+14. [What to Read Next](#what-to-read-next)
 
 ---
 
@@ -597,6 +598,232 @@ Use `@IF_ARCH` to guard architecture-specific code:
 For full details, see:
 - [MVIS Opcodes Reference](mvis-opcodes.md) — complete MVIS instruction set
 - [Architecture-Specific Opcodes](arch-specific-opcodes.md) — non-MVIS instructions per architecture
+
+---
+
+## Standard Libraries and Cross-Platform I/O
+
+One of UA's most powerful features is writing **portable I/O code** that works across every supported target — without you needing to know the underlying operating system or CPU conventions. This chapter explains how the `std_io` library achieves this and how you can use it in your own programs.
+
+### The Problem: Every Platform Is Different
+
+Printing a string to the screen sounds simple, but every OS and CPU does it differently:
+
+| Platform | Mechanism | Syscall Write | Syscall Read | Syscall Register |
+|----------|-----------|---------------|--------------|------------------|
+| x86-64 Linux | `SYSCALL` | 1 | 0 | RAX (R0) |
+| x86-32 Linux | `INT 0x80` | 4 | 3 | EAX (R0) |
+| ARM Linux | `SVC #0` | 4 | 3 | r7 (R7) |
+| ARM64 Linux | `SVC #0` | 64 | 63 | X8 (via R7) |
+| RISC-V Linux | `ECALL` | 64 | 63 | a7 (R7) |
+| x86-64 Windows | Win32 API | WriteFile | ReadFile | dispatcher |
+
+The syscall numbers are different, the registers for arguments are different, and even the instruction to trigger the call is different. Writing raw syscalls would force you to maintain six separate codepaths.
+
+### The Solution: `std_io` and the Precompiler
+
+UA solves this with two mechanisms working together:
+
+1. **The `SYS` instruction** — a single MVIS opcode that emits the correct syscall instruction for the target (SYSCALL, INT 0x80, SVC #0, ECALL, or a Win32 API call).
+2. **Precompiler conditionals** (`@IF_ARCH`, `@IF_SYS`) — let the library set up the right registers for each platform, all in one source file.
+
+The `std_io` library uses these to give you two simple, universal functions:
+
+```asm
+@IMPORT std_io
+
+    ; --- Printing ---
+    LDS  R0, "Hello, world!\n"
+    CALL std_io.print          ; print null-terminated string at R0
+
+    ; --- Reading ---
+    BUFFER input, 64           ; allocate a 64-byte buffer
+    GET  R0, input             ; R0 = buffer address
+    LDI  R1, 64               ; R1 = max bytes to read
+    CALL std_io.read           ; read from stdin into buffer
+    ; R0 = bytes actually read (on Linux)
+```
+
+That's it. The same code compiles unchanged for x86-64, ARM, ARM64, RISC-V, x86-32, on both Linux and Windows (where applicable).
+
+### How `std_io.print` Works (Under the Hood)
+
+Let's trace what happens when you call `std_io.print` on different platforms.
+
+Every version of `print` follows the same algorithm:
+
+1. **Save the buffer pointer** into the register the OS expects.
+2. **Compute strlen** — walk bytes with `LOADB` until a null byte is found.
+3. **Load the syscall number** and file descriptor into their platform-specific registers.
+4. **Call `SYS`** to invoke the OS.
+5. **`RET`** back to the caller.
+
+The only things that change between platforms are *which registers hold what* and *which syscall number to use*.
+
+#### Example: x86-64 Linux vs. ARM Linux
+
+**x86-64 Linux** — the write syscall expects:
+- R0 (RAX) = syscall number (1)
+- R7 (RDI) = file descriptor (1 = stdout)
+- R6 (RSI) = buffer pointer
+- R2 (RDX) = byte count
+
+```asm
+@IF_ARCH x86
+print:
+    MOV  R6, R0          ; RSI = buf
+    ; ... strlen loop sets R2 = length ...
+    LDI  R0, 1           ; RAX = 1 (write)
+    LDI  R7, 1           ; RDI = 1 (stdout)
+    SYS                  ; SYSCALL
+    RET
+@ENDIF
+```
+
+**ARM Linux** — the write syscall expects:
+- R7 = syscall number (4)
+- R0 = file descriptor (1 = stdout)
+- R1 = buffer pointer
+- R2 = byte count
+
+```asm
+@IF_ARCH arm
+@IF_SYS linux
+print:
+    MOV  R1, R0          ; r1 = buf
+    ; ... strlen loop sets R2 = length ...
+    LDI  R7, 4           ; r7 = 4 (write)
+    LDI  R0, 1           ; r0 = 1 (stdout)
+    SYS                  ; SVC #0
+    RET
+@ENDIF
+@ENDIF
+```
+
+Notice how the *algorithm* is identical — only the register assignments and syscall numbers differ. The `@IF_ARCH` / `@IF_SYS` blocks ensure only the correct version is compiled.
+
+### How `std_io.read` Works
+
+The `read` function is even simpler because there is no strlen step — the caller provides the maximum byte count directly in R1.
+
+The calling convention is:
+- **R0** = pointer to a buffer (created with `BUFFER`)
+- **R1** = maximum number of bytes to read
+
+After the call, **R0** contains the number of bytes actually read (on Linux). On Windows, the byte count is stored internally by the dispatcher.
+
+A complete example:
+
+```asm
+@IMPORT std_io
+
+    BUFFER my_buf, 128       ; 128-byte input buffer
+    JMP main
+
+main:
+    ; Prompt the user
+    LDS  R0, "Enter your name: "
+    CALL std_io.print
+
+    ; Read input
+    GET  R0, my_buf          ; R0 = buffer address
+    LDI  R1, 127             ; leave 1 byte for null terminator
+    CALL std_io.read         ; R0 = bytes read
+
+    ; Null-terminate the input
+    MOV  R2, R0              ; R2 = bytes read
+    GET  R3, my_buf
+    ADD  R3, R2              ; R3 = address of first byte after input
+    LDI  R1, 0
+    STOREB R1, R3            ; write null terminator
+
+    ; Echo it back
+    LDS  R0, "Hello, "
+    CALL std_io.print
+    GET  R0, my_buf
+    CALL std_io.print
+    HLT
+```
+
+### The ARM64 Trick: Hidden Register X8
+
+AArch64 (ARM64) Linux is unique: it puts the syscall number in register **X8**, but UA only maps R0–R7 to X0–X7. There's no R8!
+
+The UAS compiler handles this transparently. When you write `SYS` and compile for ARM64, the backend automatically emits:
+
+```
+MOV X8, X7      ; copy R7 (X7) into X8
+SVC #0          ; supervisor call
+```
+
+This means you use the same convention as ARM and RISC-V — **put the syscall number in R7** — and the compiler takes care of the rest. You never need to worry about X8.
+
+### The Win32 Dispatcher
+
+On Windows, there are no syscall numbers. Instead, the `SYS` instruction jumps to a built-in **syscall dispatcher** in the generated executable:
+
+- If **R0 = 1** (or any nonzero value), the dispatcher calls **WriteFile** via kernel32.dll → prints the buffer.
+- If **R0 = 0**, the dispatcher calls **ReadFile** via kernel32.dll → reads into the buffer.
+
+The register setup is the same as Linux x86-64 (R6 = buffer, R2 = count), so the `std_io` library's x86 section handles both Linux and Windows without any `@IF_SYS` split. The x86 print and read blocks are simply guarded by `@IF_ARCH x86` and work on both operating systems.
+
+### Writing Your Own Precompiler-Guarded Libraries
+
+You can use the same technique in your own code. The key precompiler directives are:
+
+| Directive | Purpose |
+|-----------|---------|
+| `@IF_ARCH x86` | Include block only for x86-64 |
+| `@IF_ARCH arm64` | Include block only for AArch64 |
+| `@IF_SYS linux` | Include block only for Linux |
+| `@IF_SYS win32` | Include block only for Windows |
+| `@ENDIF` | End a conditional block |
+| `@ARCH_ONLY x86, arm` | Abort compilation if arch doesn't match |
+| `@SYS_ONLY linux` | Abort compilation if system doesn't match |
+
+Conditionals nest freely:
+
+```asm
+@IF_SYS linux
+    @IF_ARCH arm
+        ; ARM + Linux only
+    @ENDIF
+    @IF_ARCH arm64
+        ; ARM64 + Linux only
+    @ENDIF
+@ENDIF
+```
+
+### Quick Reference: Syscall Register Cheat Sheet
+
+When writing your own syscalls (beyond what `std_io` provides), here's the register mapping:
+
+**x86-64 (SYSCALL):**
+| Argument | UA Register | Native Register |
+|----------|------------|------------------|
+| Syscall# | R0 | RAX |
+| Arg 1 | R7 | RDI |
+| Arg 2 | R6 | RSI |
+| Arg 3 | R2 | RDX |
+| Return | R0 | RAX |
+
+**ARM / ARM64 / RISC-V (SVC / ECALL):**
+| Argument | UA Register | ARM | ARM64 | RISC-V |
+|----------|------------|-----|-------|--------|
+| Syscall# | R7 | r7 | X7→X8 | a7 |
+| Arg 1 | R0 | r0 | X0 | a0 |
+| Arg 2 | R1 | r1 | X1 | a1 |
+| Arg 3 | R2 | r2 | X2 | a2 |
+| Return | R0 | r0 | X0 | a0 |
+
+**x86-32 (INT 0x80):**
+| Argument | UA Register | Native Register |
+|----------|------------|------------------|
+| Syscall# | R0 | EAX |
+| Arg 1 | R3 | EBX |
+| Arg 2 | R1 | ECX |
+| Arg 3 | R2 | EDX |
+| Return | R0 | EAX |
 
 ---
 

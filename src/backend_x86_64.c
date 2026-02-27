@@ -770,21 +770,27 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count,
 
     /* --- Win32 runtime stub addresses (computed for pass 2 CALL targets) */
     /* Layout after string data:
-     *   [write_dispatcher  84 bytes]
-     *   [exit_dispatcher   12 bytes]
-     *   [stdout_handle      8 bytes]
-     *   [written_var        8 bytes]
-     *   [IAT: 4 × 8       32 bytes]  (GetStdHandle, WriteFile, ExitProcess, null)
+     *   [syscall_dispatcher  6 bytes]  (cmp rax,0; je read)
+     *   [write_dispatcher   84 bytes]
+     *   [read_dispatcher    84 bytes]
+     *   [exit_dispatcher    16 bytes]
+     *   [stdout_handle       8 bytes]
+     *   [stdin_handle        8 bytes]
+     *   [written_var         8 bytes]
+     *   [read_var            8 bytes]
+     *   [IAT: 5 × 8        40 bytes]  (GetStdHandle, WriteFile, ReadFile,
+     *                                   ExitProcess, null)
      */
+    #define W32_DISPATCH_SIZE    6   /* syscall dispatcher (cmp+je)     */
     #define W32_WRITE_STUB_SIZE  84
+    #define W32_READ_STUB_SIZE   84
     #define W32_EXIT_STUB_SIZE   16
-    #define W32_DATA_SIZE        16  /* stdout_handle(8) + written(8) */
-    #define W32_IAT_SIZE         32  /* 4 entries × 8 bytes */
-    int stub_base  = str_base + strtab.total_size;  /* start of write_dispatcher */
-    int exit_base  = stub_base + W32_WRITE_STUB_SIZE;
-    /* iat_offset within code buffer = stub_base + 84 + 12 + 16 */
-    int iat_offset = stub_base + W32_WRITE_STUB_SIZE + W32_EXIT_STUB_SIZE
-                   + W32_DATA_SIZE;
+    #define W32_DATA_SIZE        32  /* stdout(8)+stdin(8)+written(8)+read(8) */
+    #define W32_IAT_SIZE         40  /* 5 entries × 8 bytes */
+    int stub_base  = str_base + strtab.total_size;  /* start of syscall_dispatcher */
+    int exit_base  = stub_base + W32_DISPATCH_SIZE + W32_WRITE_STUB_SIZE
+                   + W32_READ_STUB_SIZE;
+    int iat_offset = exit_base + W32_EXIT_STUB_SIZE + W32_DATA_SIZE;
     (void)iat_offset;  /* recorded later as code->pe_iat_offset */
 
     /* --- Pass 2: code emission ----------------------------------------- */
@@ -1401,9 +1407,9 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count,
         /* ---- SYS ------------------------------------------------ */
         case OP_SYS:
             if (g_win32) {
-                /* CALL rel32 → write_dispatcher */
+                /* CALL rel32 → syscall_dispatcher */
                 int32_t rel = (int32_t)(stub_base - (code->size + 5));
-                fprintf(stderr, "  SYS -> CALL write_dispatcher\n");
+                fprintf(stderr, "  SYS -> CALL syscall_dispatcher\n");
                 emit_byte(code, 0xE8);
                 emit_byte(code, (uint8_t)( rel        & 0xFF));
                 emit_byte(code, (uint8_t)((rel >>  8) & 0xFF));
@@ -1494,60 +1500,126 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count,
 
     /* --- Append Win32 runtime (dispatcher stubs + IAT) ----------------- */
     if (g_win32) {
-        /* All RIP-relative offsets within the stubs are constants because
-         * the layout of stubs, handle, written_var, and IAT is fixed:
+        /* RIP-relative offsets within each stub are constants derived from
+         * the fixed layout of the entire runtime block.
          *
-         *   Byte 0..83:    write_dispatcher  (84 bytes)
-         *   Byte 84..99:   exit_dispatcher   (16 bytes)
-         *   Byte 100..107: stdout_handle     (8 bytes)
-         *   Byte 108..115: written_var       (8 bytes)
-         *   Byte 116..123: IAT[0] GetStdHandle
-         *   Byte 124..131: IAT[1] WriteFile
-         *   Byte 132..139: IAT[2] ExitProcess
-         *   Byte 140..147: IAT[3] null terminator
+         * All offsets below are relative to the start of this runtime area
+         * (i.e. the first byte of syscall_dispatcher = "byte 0"):
          *
-         * RIP-relative disp32 = target - instruction_end  (within stub)
+         *   Byte 0..5:     syscall_dispatcher  (6 bytes)
+         *   Byte 6..89:    write_dispatcher    (84 bytes)
+         *   Byte 90..173:  read_dispatcher     (84 bytes)
+         *   Byte 174..189: exit_dispatcher     (16 bytes)
+         *   Byte 190..197: stdout_handle       (8 bytes)
+         *   Byte 198..205: stdin_handle        (8 bytes)
+         *   Byte 206..213: written_var         (8 bytes)
+         *   Byte 214..221: read_var            (8 bytes)
+         *   Byte 222..229: IAT[0] GetStdHandle
+         *   Byte 230..237: IAT[1] WriteFile
+         *   Byte 238..245: IAT[2] ReadFile
+         *   Byte 246..253: IAT[3] ExitProcess
+         *   Byte 254..261: IAT[4] null terminator
+         *
+         * RIP-relative disp32 = target - instruction_end
          */
+
+        /* ---- syscall_dispatcher (6 bytes) ---- */
+        /* Checks RAX: 0 = read, nonzero = write (fall-through).
+         *   cmp rax, 0    (4 bytes)
+         *   je +84        (2 bytes) -> read_dispatcher at byte 90 */
+        static const uint8_t syscall_dispatcher[6] = {
+            0x48, 0x83, 0xF8, 0x00,              /* cmp rax, 0              */
+            0x74, 0x54                            /* je +84 → read_dispatcher */
+        };
+        for (int b = 0; b < 6; b++)
+            emit_byte(code, syscall_dispatcher[b]);
+
+        /* ---- write_dispatcher (84 bytes, starts at runtime byte 6) ---- */
+        /* Translates Linux write-syscall ABI (RSI=buf, RDX=count) to
+         * WriteFile(hStdout, buf, count, &written, NULL) via Win32 ABI.
+         *
+         * RIP-relative targets for write_dispatcher (abs = byte within runtime):
+         *   stdout_handle  @ 190:  end@6+21=27,  disp=190-27=163 (0xA3)
+         *   IAT[0]         @ 222:  end@6+46=52,  disp=222-52=170 (0xAA)
+         *   stdout_handle  @ 190:  end@6+57=63,  disp=190-63=127 (0x7F)
+         *   IAT[1]         @ 230:  end@6+82=88,  disp=230-88=142 (0x8E) */
         static const uint8_t write_dispatcher[84] = {
             /* 0  */ 0x55,                               /* push rbp              */
             /* 1  */ 0x48, 0x89, 0xE5,                   /* mov rbp, rsp          */
             /* 4  */ 0x48, 0x83, 0xEC, 0x40,             /* sub rsp, 64           */
             /* 8  */ 0x49, 0x89, 0xD0,                   /* mov r8, rdx  (count)  */
             /* 11 */ 0x48, 0x89, 0xF2,                   /* mov rdx, rsi (buffer) */
-            /* 14 */ 0x48, 0x8B, 0x0D, 0x4F,0x00,0x00,0x00,  /* mov rcx,[rip+79] → handle  (end@21, tgt@100, 100-21=79) */
+            /* 14 */ 0x48, 0x8B, 0x0D, 0xA3,0x00,0x00,0x00,  /* mov rcx,[rip+163] → stdout_handle */
             /* 21 */ 0x48, 0x85, 0xC9,                   /* test rcx, rcx         */
             /* 24 */ 0x75, 0x25,                         /* jnz +37 → byte 63    */
-            /* --- GetStdHandle path --- */
+            /* --- GetStdHandle(-11) path --- */
             /* 26 */ 0x41, 0x50,                         /* push r8               */
             /* 28 */ 0x52,                               /* push rdx              */
-            /* 29 */ 0x48, 0xC7, 0xC1, 0xF5,0xFF,0xFF,0xFF,  /* mov rcx, -11    */
+            /* 29 */ 0x48, 0xC7, 0xC1, 0xF5,0xFF,0xFF,0xFF,  /* mov rcx, -11 (STD_OUTPUT) */
             /* 36 */ 0x48, 0x83, 0xEC, 0x20,             /* sub rsp, 32 (shadow)  */
-            /* 40 */ 0xFF, 0x15, 0x46,0x00,0x00,0x00,    /* call [rip+70] → IAT[0]  (end@46, tgt@116, 116-46=70) */
+            /* 40 */ 0xFF, 0x15, 0xAA,0x00,0x00,0x00,    /* call [rip+170] → IAT[0] GetStdHandle */
             /* 46 */ 0x48, 0x83, 0xC4, 0x20,             /* add rsp, 32           */
-            /* 50 */ 0x48, 0x89, 0x05, 0x2B,0x00,0x00,0x00,  /* mov [rip+43],rax → handle  (end@57, tgt@100, 100-57=43) */
+            /* 50 */ 0x48, 0x89, 0x05, 0x7F,0x00,0x00,0x00,  /* mov [rip+127],rax → stdout_handle */
             /* 57 */ 0x48, 0x89, 0xC1,                   /* mov rcx, rax          */
             /* 60 */ 0x5A,                               /* pop rdx               */
             /* 61 */ 0x41, 0x58,                         /* pop r8                */
             /* --- have_handle: --- */
             /* 63 */ 0x4C, 0x8D, 0x4D, 0xF8,            /* lea r9, [rbp-8]       */
             /* 67 */ 0x48,0xC7,0x44,0x24,0x20, 0x00,0x00,0x00,0x00,  /* mov qword [rsp+32], 0 */
-            /* 76 */ 0xFF, 0x15, 0x2A,0x00,0x00,0x00,    /* call [rip+42] → IAT[1]  (end@82, tgt@124, 124-82=42) */
+            /* 76 */ 0xFF, 0x15, 0x8E,0x00,0x00,0x00,    /* call [rip+142] → IAT[1] WriteFile */
             /* 82 */ 0xC9,                               /* leave                 */
             /* 83 */ 0xC3                                /* ret                   */
         };
         for (int b = 0; b < 84; b++)
             emit_byte(code, write_dispatcher[b]);
 
-        /* exit_dispatcher: align stack, then call ExitProcess(0) via IAT[2]
-         *   sub rsp,56 + and rsp,-16 guarantees 16-byte alignment
-         *   regardless of incoming RSP value.
-         *   end@16(within exit stub) = stub byte 100.
-         *   target IAT[2] = byte 132.  132-100 = 32. */
+        /* ---- read_dispatcher (84 bytes, starts at runtime byte 90) ---- */
+        /* Translates Linux read-syscall ABI (RSI=buf, RDX=count) to
+         * ReadFile(hStdin, buf, count, &read_var, NULL) via Win32 ABI.
+         *
+         * RIP-relative targets for read_dispatcher:
+         *   stdin_handle   @ 198:  end@90+21=111, disp=198-111=87  (0x57)
+         *   IAT[0]         @ 222:  end@90+46=136, disp=222-136=86  (0x56)
+         *   stdin_handle   @ 198:  end@90+57=147, disp=198-147=51  (0x33)
+         *   IAT[2]         @ 238:  end@90+82=172, disp=238-172=66  (0x42) */
+        static const uint8_t read_dispatcher[84] = {
+            /* 0  */ 0x55,                               /* push rbp              */
+            /* 1  */ 0x48, 0x89, 0xE5,                   /* mov rbp, rsp          */
+            /* 4  */ 0x48, 0x83, 0xEC, 0x40,             /* sub rsp, 64           */
+            /* 8  */ 0x49, 0x89, 0xD0,                   /* mov r8, rdx  (count)  */
+            /* 11 */ 0x48, 0x89, 0xF2,                   /* mov rdx, rsi (buffer) */
+            /* 14 */ 0x48, 0x8B, 0x0D, 0x57,0x00,0x00,0x00,  /* mov rcx,[rip+87] → stdin_handle */
+            /* 21 */ 0x48, 0x85, 0xC9,                   /* test rcx, rcx         */
+            /* 24 */ 0x75, 0x25,                         /* jnz +37 → byte 63    */
+            /* --- GetStdHandle(-10) path --- */
+            /* 26 */ 0x41, 0x50,                         /* push r8               */
+            /* 28 */ 0x52,                               /* push rdx              */
+            /* 29 */ 0x48, 0xC7, 0xC1, 0xF6,0xFF,0xFF,0xFF,  /* mov rcx, -10 (STD_INPUT) */
+            /* 36 */ 0x48, 0x83, 0xEC, 0x20,             /* sub rsp, 32 (shadow)  */
+            /* 40 */ 0xFF, 0x15, 0x56,0x00,0x00,0x00,    /* call [rip+86] → IAT[0] GetStdHandle */
+            /* 46 */ 0x48, 0x83, 0xC4, 0x20,             /* add rsp, 32           */
+            /* 50 */ 0x48, 0x89, 0x05, 0x33,0x00,0x00,0x00,  /* mov [rip+51],rax → stdin_handle */
+            /* 57 */ 0x48, 0x89, 0xC1,                   /* mov rcx, rax          */
+            /* 60 */ 0x5A,                               /* pop rdx               */
+            /* 61 */ 0x41, 0x58,                         /* pop r8                */
+            /* --- have_handle: --- */
+            /* 63 */ 0x4C, 0x8D, 0x4D, 0xF8,            /* lea r9, [rbp-8]       */
+            /* 67 */ 0x48,0xC7,0x44,0x24,0x20, 0x00,0x00,0x00,0x00,  /* mov qword [rsp+32], 0 */
+            /* 76 */ 0xFF, 0x15, 0x42,0x00,0x00,0x00,    /* call [rip+66] → IAT[2] ReadFile */
+            /* 82 */ 0xC9,                               /* leave                 */
+            /* 83 */ 0xC3                                /* ret                   */
+        };
+        for (int b = 0; b < 84; b++)
+            emit_byte(code, read_dispatcher[b]);
+
+        /* exit_dispatcher (16 bytes, starts at runtime byte 174):
+         *   Aligns stack, then calls ExitProcess(0) via IAT[3].
+         *   end@174+16=190.  IAT[3] ExitProcess @ 246.  246-190=56 (0x38). */
         static const uint8_t exit_dispatcher[16] = {
             0x31, 0xC9,                                  /* xor ecx, ecx (exit 0)   */
             0x48, 0x83, 0xEC, 0x38,                      /* sub rsp, 56             */
             0x48, 0x83, 0xE4, 0xF0,                      /* and rsp, -16 (align)    */
-            0xFF, 0x15, 0x20,0x00,0x00,0x00              /* call [rip+32] → IAT[2]  */
+            0xFF, 0x15, 0x38,0x00,0x00,0x00              /* call [rip+56] → IAT[3] ExitProcess */
         };
         for (int b = 0; b < 16; b++)
             emit_byte(code, exit_dispatcher[b]);
@@ -1555,21 +1627,27 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count,
         /* stdout_handle  (8 bytes, init 0) */
         for (int b = 0; b < 8; b++) emit_byte(code, 0x00);
 
+        /* stdin_handle   (8 bytes, init 0) */
+        for (int b = 0; b < 8; b++) emit_byte(code, 0x00);
+
         /* written_var  (8 bytes, init 0) */
         for (int b = 0; b < 8; b++) emit_byte(code, 0x00);
 
-        /* IAT: 4 entries × 8 bytes (filled by PE emitter on disk,
+        /* read_var  (8 bytes, init 0) */
+        for (int b = 0; b < 8; b++) emit_byte(code, 0x00);
+
+        /* IAT: 5 entries × 8 bytes (filled by PE emitter on disk,
          *       patched by Windows loader at runtime) */
         code->pe_iat_offset = code->size;
-        code->pe_iat_count  = 4;   /* GetStdHandle, WriteFile, ExitProcess, null */
-        for (int b = 0; b < 32; b++) emit_byte(code, 0x00);
+        code->pe_iat_count  = 5;   /* GetStdHandle, WriteFile, ReadFile, ExitProcess, null */
+        for (int b = 0; b < 40; b++) emit_byte(code, 0x00);
 
         fprintf(stderr, "[x86-64] Emitted %d bytes (%d code + %d var + %d buf + %d str"
                 " + %d win32rt)\n",
                 code->size, var_base, vartab.count * X64_VAR_SIZE,
                 buftab.total_size, strtab.total_size,
-                W32_WRITE_STUB_SIZE + W32_EXIT_STUB_SIZE + W32_DATA_SIZE
-                + W32_IAT_SIZE);
+                W32_DISPATCH_SIZE + W32_WRITE_STUB_SIZE + W32_READ_STUB_SIZE
+                + W32_EXIT_STUB_SIZE + W32_DATA_SIZE + W32_IAT_SIZE);
     } else {
         fprintf(stderr, "[x86-64] Emitted %d bytes (%d code + %d var + %d buf + %d str)\n",
                 code->size, var_base, vartab.count * X64_VAR_SIZE,
