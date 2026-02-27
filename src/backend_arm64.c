@@ -745,6 +745,11 @@ static int instruction_size_a64(const Instruction *inst)
         case OP_LOADB:  return 4;   /* LDRB Wd, [Xn]  */
         case OP_STOREB: return 4;   /* STRB Wt, [Xn]  */
         case OP_SYS:    return 4;   /* SVC #0          */
+
+        /* ---- Architecture-specific opcodes (ARM64) --------------------- */
+        case OP_WFI:    return 4;   /* WFI:   D503207F */
+        case OP_DMB:    return 4;   /* DMB SY: D5033FBF */
+
         default:        return 0;
     }
 }
@@ -1516,6 +1521,18 @@ CodeBuffer* generate_arm64(const Instruction *ir, int ir_count)
         case OP_SYS:
             fprintf(stderr, "  SYS -> SVC #0\n");
             emit_a64_svc(code, 0);
+            break;
+
+        /* ---- WFI ------------------------------------------ 4 bytes --- */
+        case OP_WFI:
+            fprintf(stderr, "  WFI\n");
+            emit_a64(code, 0xD503207Fu);   /* HINT #3 = WFI */
+            break;
+
+        /* ---- DMB SY --------------------------------------- 4 bytes --- */
+        case OP_DMB:
+            fprintf(stderr, "  DMB SY\n");
+            emit_a64(code, 0xD5033FBFu);   /* DMB SY */
             break;
 
         default: {

@@ -754,6 +754,11 @@ static int instruction_size_arm(const Instruction *inst)
         case OP_LOADB:  return 4;   /* LDRB Rd, [Rs]  */
         case OP_STOREB: return 4;   /* STRB Rs, [Rd]  */
         case OP_SYS:    return 4;   /* SVC #0         */
+
+        /* ---- Architecture-specific opcodes (ARM) ----------------------- */
+        case OP_WFI:    return 4;   /* WFI  (cond=AL): E320F003 */
+        case OP_DMB:    return 4;   /* DMB SY:         F57FF05F */
+
         default:        return 0;
     }
 }
@@ -1586,6 +1591,18 @@ CodeBuffer* generate_arm(const Instruction *ir, int ir_count)
         case OP_SYS:
             fprintf(stderr, "  SYS -> SVC #0\n");
             emit_arm_svc(code, 0);
+            break;
+
+        /* ---- WFI ------------------------------------------ 4 bytes --- */
+        case OP_WFI:
+            fprintf(stderr, "  WFI\n");
+            emit_arm32(code, 0xE320F003u);   /* WFI (cond=AL) */
+            break;
+
+        /* ---- DMB SY --------------------------------------- 4 bytes --- */
+        case OP_DMB:
+            fprintf(stderr, "  DMB SY\n");
+            emit_arm32(code, 0xF57FF05Fu);   /* DMB SY (unconditional) */
             break;
 
         default: {

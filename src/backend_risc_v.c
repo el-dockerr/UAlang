@@ -635,6 +635,12 @@ static int instruction_size_rv(const Instruction *inst)
         case OP_LOADB:  return 4;   /* LBU Rd, 0(Rs)  */
         case OP_STOREB: return 4;   /* SB  Rs, 0(Rd)  */
         case OP_SYS:    return 4;   /* ECALL           */
+
+        /* ---- Architecture-specific opcodes (RISC-V) -------------------- */
+        case OP_WFI:    return 4;   /* WFI:    10500073 */
+        case OP_EBREAK: return 4;   /* EBREAK: 00100073 */
+        case OP_FENCE:  return 4;   /* FENCE:  0FF0000F */
+
         default:        return 0;
     }
 }
@@ -1393,6 +1399,24 @@ CodeBuffer* generate_risc_v(const Instruction *ir, int ir_count)
         case OP_SYS:
             fprintf(stderr, "  SYS -> ECALL\n");
             emit_rv_ecall(code);
+            break;
+
+        /* ---- WFI ------------------------------------------ 4 bytes --- */
+        case OP_WFI:
+            fprintf(stderr, "  WFI\n");
+            emit_rv32(code, 0x10500073u);  /* WFI */
+            break;
+
+        /* ---- EBREAK --------------------------------------- 4 bytes --- */
+        case OP_EBREAK:
+            fprintf(stderr, "  EBREAK\n");
+            emit_rv32(code, 0x00100073u);  /* EBREAK */
+            break;
+
+        /* ---- FENCE iorw, iorw ----------------------------- 4 bytes --- */
+        case OP_FENCE:
+            fprintf(stderr, "  FENCE\n");
+            emit_rv32(code, 0x0FF0000Fu);  /* FENCE iorw, iorw */
             break;
 
         default: {

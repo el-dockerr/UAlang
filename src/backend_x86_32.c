@@ -500,6 +500,14 @@ static int instruction_size_x32(const Instruction *inst)
             { int rd = inst->operands[1].data.reg;
               return (rd == 4 || rd == 5) ? 3 : 2; }
         case OP_SYS:    return 2;   /* INT 0x80  (CD 80) */
+
+        /* ---- Architecture-specific opcodes (x86-32) -------------------- */
+        case OP_CPUID:  return 2;   /* 0F A2 */
+        case OP_RDTSC:  return 2;   /* 0F 31 */
+        case OP_BSWAP:  return 2;   /* 0F C8+rd */
+        case OP_PUSHA:  return 1;   /* 60 */
+        case OP_POPA:   return 1;   /* 61 */
+
         default:        return 0;
     }
 }
@@ -1274,6 +1282,42 @@ CodeBuffer* generate_x86_32(const Instruction *ir, int ir_count)
             fprintf(stderr, "  SYS -> INT 0x80\n");
             emit_byte(code, 0xCD);
             emit_byte(code, 0x80);
+            break;
+
+        /* ---- CPUID ----------------------------------------- 2 bytes --- */
+        case OP_CPUID:
+            fprintf(stderr, "  CPUID\n");
+            emit_byte(code, 0x0F);
+            emit_byte(code, 0xA2);
+            break;
+
+        /* ---- RDTSC ----------------------------------------- 2 bytes --- */
+        case OP_RDTSC:
+            fprintf(stderr, "  RDTSC\n");
+            emit_byte(code, 0x0F);
+            emit_byte(code, 0x31);
+            break;
+
+        /* ---- BSWAP Rd ------------------------------------- 2 bytes --- */
+        case OP_BSWAP: {
+            int rd = inst->operands[0].data.reg;
+            uint8_t enc = X32_REG_ENC[rd];
+            fprintf(stderr, "  BSWAP %s\n", X32_REG_NAME[rd]);
+            emit_byte(code, 0x0F);
+            emit_byte(code, (uint8_t)(0xC8 + enc));
+            break;
+        }
+
+        /* ---- PUSHA ----------------------------------------- 1 byte  --- */
+        case OP_PUSHA:
+            fprintf(stderr, "  PUSHA\n");
+            emit_byte(code, 0x60);
+            break;
+
+        /* ---- POPA ------------------------------------------ 1 byte  --- */
+        case OP_POPA:
+            fprintf(stderr, "  POPA\n");
+            emit_byte(code, 0x61);
             break;
 
         default: {

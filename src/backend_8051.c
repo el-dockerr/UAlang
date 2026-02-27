@@ -392,6 +392,19 @@ static int instruction_size_8051(const Instruction *inst)
                 "SYS is not supported on the 8051 (baremetal, no OS)");
             return 0;
 
+        /* ---- Architecture-specific opcodes (8051) ---------------------- */
+        case OP_DJNZ:   return 2;   /* D8+n, rel8 */
+        case OP_CJNE:
+            /* CJNE A, #imm, rel8 = 3 bytes; if reg!=A, MOV A,Rn (1) + 3 = 4 */
+            if (inst->operands[0].data.reg == 0) return 3;
+            return 4;
+        case OP_SETB:   return 2;   /* D2, bit_addr */
+        case OP_CLR:
+            /* CLR A = 1 byte (E4); CLR bit = 2 bytes (C2, addr) */
+            if (inst->operands[0].data.reg == 0) return 1;
+            return 2;
+        case OP_RETI:   return 1;   /* 32 */
+
         default:
             (void)rd; (void)rs; (void)imm;
             backend_error(inst, "unsupported opcode for 8051 backend");
@@ -1262,6 +1275,91 @@ static void pass2_emit_code(const Instruction *ir, int ir_count,
         case OP_SYS:
             backend_error(inst,
                 "SYS is not supported on the 8051 (baremetal, no OS)");
+            break;
+
+        /* ----------------------------------------------------------------
+         *  DJNZ Rn, label  ->  [0xD8+n, rel8]                2 bytes
+         *  Decrement Rn and jump if not zero.
+         * ---------------------------------------------------------------- */
+        case OP_DJNZ:
+            rd = inst->operands[0].data.reg;
+            validate_register(inst, rd);
+            target_addr = symtab_lookup(st, inst->operands[1].data.label);
+            if (target_addr < 0) {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                         "undefined label '%s'",
+                         inst->operands[1].data.label);
+                backend_error(inst, msg);
+            }
+            rel = target_addr - (buf->size + 2);
+            if (rel < -128 || rel > 127) {
+                backend_error(inst,
+                    "DJNZ target out of range for 8-bit relative jump");
+            }
+            emit(buf, (uint8_t)(0xD8 + rd));
+            emit(buf, (uint8_t)(rel & 0xFF));
+            break;
+
+        /* ----------------------------------------------------------------
+         *  CJNE Rn, #imm, label  ->  CJNE A, #imm, rel8      3-4 bytes
+         *  If Rn != A, polyfill via MOV A, Rn first.
+         * ---------------------------------------------------------------- */
+        case OP_CJNE: {
+            rd  = inst->operands[0].data.reg;
+            imm = inst->operands[1].data.imm;
+            validate_register(inst, rd);
+            int cjne_size = (rd == 0) ? 3 : 4;
+            target_addr = symtab_lookup(st, inst->operands[2].data.label);
+            if (target_addr < 0) {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                         "undefined label '%s'",
+                         inst->operands[2].data.label);
+                backend_error(inst, msg);
+            }
+            rel = target_addr - (buf->size + cjne_size);
+            if (rel < -128 || rel > 127) {
+                backend_error(inst,
+                    "CJNE target out of range for 8-bit relative jump");
+            }
+            if (rd != 0) {
+                emit_mov_a_rn(buf, rd);  /* MOV A, Rn  (1 byte) */
+            }
+            emit(buf, 0xB4);             /* CJNE A, #imm, rel8 */
+            emit(buf, (uint8_t)(imm & 0xFF));
+            emit(buf, (uint8_t)(rel & 0xFF));
+            break;
+        }
+
+        /* ----------------------------------------------------------------
+         *  SETB bit_addr  ->  [0xD2, bit_addr]               2 bytes
+         *  Register number is used as direct bit address.
+         * ---------------------------------------------------------------- */
+        case OP_SETB:
+            rd = inst->operands[0].data.reg;
+            emit(buf, 0xD2);
+            emit(buf, (uint8_t)(rd & 0xFF));
+            break;
+
+        /* ----------------------------------------------------------------
+         *  CLR reg  ->  0xE4 (CLR A) or 0xC2 (CLR bit)       1-2 bytes
+         * ---------------------------------------------------------------- */
+        case OP_CLR:
+            rd = inst->operands[0].data.reg;
+            if (rd == 0) {
+                emit(buf, 0xE4);         /* CLR A */
+            } else {
+                emit(buf, 0xC2);         /* CLR bit_addr */
+                emit(buf, (uint8_t)(rd & 0xFF));
+            }
+            break;
+
+        /* ----------------------------------------------------------------
+         *  RETI  ->  [0x32]                                   1 byte
+         * ---------------------------------------------------------------- */
+        case OP_RETI:
+            emit(buf, 0x32);
             break;
 
         default:

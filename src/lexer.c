@@ -81,6 +81,21 @@ static const char *OPCODES[] = {
     "JL",
     "JG",
     "BUFFER",
+    /* Architecture-specific opcodes */
+    "CPUID",
+    "RDTSC",
+    "BSWAP",
+    "PUSHA",
+    "POPA",
+    "DJNZ",
+    "CJNE",
+    "SETB",
+    "CLR",
+    "RETI",
+    "WFI",
+    "DMB",
+    "EBREAK",
+    "FENCE",
     NULL                        /* sentinel */
 };
 

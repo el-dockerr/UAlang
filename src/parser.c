@@ -84,6 +84,21 @@ static const MnemonicEntry MNEMONIC_TABLE[] = {
     { "JL",    OP_JL    },
     { "JG",    OP_JG    },
     { "BUFFER",OP_BUFFER},
+    /* Architecture-specific opcodes */
+    { "CPUID", OP_CPUID  },
+    { "RDTSC", OP_RDTSC  },
+    { "BSWAP", OP_BSWAP  },
+    { "PUSHA", OP_PUSHA  },
+    { "POPA",  OP_POPA   },
+    { "DJNZ",  OP_DJNZ   },
+    { "CJNE",  OP_CJNE   },
+    { "SETB",  OP_SETB   },
+    { "CLR",   OP_CLR    },
+    { "RETI",  OP_RETI   },
+    { "WFI",   OP_WFI    },
+    { "DMB",   OP_DMB    },
+    { "EBREAK",OP_EBREAK },
+    { "FENCE", OP_FENCE  },
     { NULL,    OP_COUNT }       /* sentinel */
 };
 
@@ -183,6 +198,21 @@ static const OpcodeShape OPCODE_SHAPES[OP_COUNT] = {
     /* OP_BUFFER*/ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } }, /* special */
     /* OP_NOP   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
     /* OP_HLT   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
+    /* --- Architecture-specific opcodes ---------------------------------- */
+    /* OP_CPUID */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
+    /* OP_RDTSC */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
+    /* OP_BSWAP */ { 1, { OPERAND_REGISTER,  OPERAND_NONE,       OPERAND_NONE } },
+    /* OP_PUSHA */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
+    /* OP_POPA  */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
+    /* OP_DJNZ  */ { 2, { OPERAND_REGISTER,  OPERAND_LABEL_REF,  OPERAND_NONE } },
+    /* OP_CJNE  */ { 3, { OPERAND_REGISTER,  OPERAND_IMMEDIATE,  OPERAND_LABEL_REF} },
+    /* OP_SETB  */ { 1, { OPERAND_REGISTER,  OPERAND_NONE,       OPERAND_NONE } },
+    /* OP_CLR   */ { 1, { OPERAND_REGISTER,  OPERAND_NONE,       OPERAND_NONE } },
+    /* OP_RETI  */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
+    /* OP_WFI   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
+    /* OP_DMB   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
+    /* OP_EBREAK*/ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
+    /* OP_FENCE */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
 };
 
 /* =========================================================================
@@ -263,6 +293,20 @@ const char* opcode_name(Opcode op)
         case OP_STOREB:return "STOREB";
         case OP_SYS:   return "SYS";
         case OP_BUFFER:return "BUFFER";
+        case OP_CPUID: return "CPUID";
+        case OP_RDTSC: return "RDTSC";
+        case OP_BSWAP: return "BSWAP";
+        case OP_PUSHA: return "PUSHA";
+        case OP_POPA:  return "POPA";
+        case OP_DJNZ:  return "DJNZ";
+        case OP_CJNE:  return "CJNE";
+        case OP_SETB:  return "SETB";
+        case OP_CLR:   return "CLR";
+        case OP_RETI:  return "RETI";
+        case OP_WFI:   return "WFI";
+        case OP_DMB:   return "DMB";
+        case OP_EBREAK:return "EBREAK";
+        case OP_FENCE: return "FENCE";
         default:       return "???";
     }
 }

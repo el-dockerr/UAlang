@@ -156,6 +156,29 @@ static const OpcodeCompliance OPCODE_COMPLIANCE[OP_COUNT] = {
     /* Miscellaneous                                                        */
     [OP_NOP]    = { UA_AALL,  UA_SALL  },
     [OP_HLT]    = { UA_AALL,  UA_SALL  },
+
+    /* --- Architecture-specific opcodes ---------------------------------- */
+    /* x86 family (x86_32 & x86_64) */
+    [OP_CPUID]  = { UA_AX86 | UA_AX86_32,            UA_SALL  },
+    [OP_RDTSC]  = { UA_AX86 | UA_AX86_32,            UA_SALL  },
+    [OP_BSWAP]  = { UA_AX86 | UA_AX86_32,            UA_SALL  },
+    [OP_PUSHA]  = { UA_AX86_32,                       UA_SALL  },
+    [OP_POPA]   = { UA_AX86_32,                       UA_SALL  },
+
+    /* 8051 exclusive */
+    [OP_DJNZ]   = { UA_AMCS51,                        UA_SALL  },
+    [OP_CJNE]   = { UA_AMCS51,                        UA_SALL  },
+    [OP_SETB]   = { UA_AMCS51,                        UA_SALL  },
+    [OP_CLR]    = { UA_AMCS51,                        UA_SALL  },
+    [OP_RETI]   = { UA_AMCS51,                        UA_SALL  },
+
+    /* ARM & ARM64 + RISC-V for WFI */
+    [OP_WFI]    = { UA_AARM | UA_AARM64 | UA_ARISCV,  UA_SALL  },
+    [OP_DMB]    = { UA_AARM | UA_AARM64,              UA_SALL  },
+
+    /* RISC-V exclusive */
+    [OP_EBREAK] = { UA_ARISCV,                        UA_SALL  },
+    [OP_FENCE]  = { UA_ARISCV,                        UA_SALL  },
 };
 
 /* -------------------------------------------------------------------------

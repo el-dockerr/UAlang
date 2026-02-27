@@ -90,6 +90,28 @@ typedef enum {
     OP_NOP,             /* NOP                      no operation             */
     OP_HLT,             /* HLT                      halt execution           */
 
+    /* --- x86 Family (x86_32 & x86_64) ---------------------------------- */
+    OP_CPUID,           /* CPUID                    CPU identification       */
+    OP_RDTSC,           /* RDTSC                    read time-stamp counter  */
+    OP_BSWAP,           /* BSWAP  Rd                byte-swap (endian)       */
+    OP_PUSHA,           /* PUSHA                    push all GP regs (32)    */
+    OP_POPA,            /* POPA                     pop all GP regs (32)     */
+
+    /* --- 8051 Exclusive ------------------------------------------------- */
+    OP_DJNZ,            /* DJNZ   Rd, label         dec & jump if not zero   */
+    OP_CJNE,            /* CJNE   Rd, #imm, label   cmp & jump if not equal  */
+    OP_SETB,            /* SETB   Rd                set bit                  */
+    OP_CLR,             /* CLR    Rd                clear bit/register       */
+    OP_RETI,            /* RETI                     return from interrupt    */
+
+    /* --- ARM & ARM64 Exclusive ------------------------------------------ */
+    OP_WFI,             /* WFI                      wait for interrupt       */
+    OP_DMB,             /* DMB                      data memory barrier      */
+
+    /* --- RISC-V Exclusive ----------------------------------------------- */
+    OP_EBREAK,          /* EBREAK                   environment breakpoint   */
+    OP_FENCE,           /* FENCE                    memory ordering fence    */
+
     OP_COUNT            /* Sentinel: total number of opcodes                 */
 } Opcode;
 

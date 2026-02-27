@@ -536,6 +536,11 @@ static int instruction_size_x64(const Instruction *inst)
         }
         case OP_SYS:    return g_win32 ? 5 : 2;   /* win32: CALL write_stub; else syscall */
 
+        /* ---- Architecture-specific opcodes (x86-64) -------------------- */
+        case OP_CPUID:  return 2;   /* 0F A2 */
+        case OP_RDTSC:  return 2;   /* 0F 31 */
+        case OP_BSWAP:  return 3;   /* REX.W 0F C8+rd */
+
         default:        return 0;
     }
 }
@@ -1410,6 +1415,32 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count,
                 emit_byte(code, 0x05);
             }
             break;
+
+        /* ---- CPUID ----------------------------------------- 2 bytes --- */
+        case OP_CPUID:
+            fprintf(stderr, "  CPUID\n");
+            emit_byte(code, 0x0F);
+            emit_byte(code, 0xA2);
+            break;
+
+        /* ---- RDTSC ----------------------------------------- 2 bytes --- */
+        case OP_RDTSC:
+            fprintf(stderr, "  RDTSC\n");
+            emit_byte(code, 0x0F);
+            emit_byte(code, 0x31);
+            break;
+
+        /* ---- BSWAP Rd ------------------------------------- 3 bytes --- */
+        case OP_BSWAP: {
+            int rd = inst->operands[0].data.reg;
+            uint8_t enc = X64_REG_ENC[rd];
+            fprintf(stderr, "  BSWAP %s\n", X64_REG_NAME[rd]);
+            /* REX.W prefix for 64-bit operand */
+            emit_byte(code, 0x48);
+            emit_byte(code, 0x0F);
+            emit_byte(code, (uint8_t)(0xC8 + enc));
+            break;
+        }
 
         default: {
             char msg[128];

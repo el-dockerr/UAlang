@@ -76,7 +76,8 @@ Hello, World!
 
 ## Key Features
 
-- **34-instruction MVIS** — a Minimum Viable Instruction Set covering data movement, arithmetic, bitwise logic, control flow, stack operations, byte-granularity memory access, string literals, and system calls
+- **37-instruction MVIS** — a Minimum Viable Instruction Set covering data movement, arithmetic, bitwise logic, control flow, stack operations, byte-granularity memory access, string literals, and system calls
+- **14 architecture-specific opcodes** — non-portable extensions for x86 (CPUID, RDTSC, BSWAP, PUSHA, POPA), 8051 (DJNZ, CJNE, SETB, CLR, RETI), ARM/ARM64 (WFI, DMB), and RISC-V (EBREAK, FENCE) with compile-time compliance enforcement
 - **Standard Libraries** — `@IMPORT std_io` and `@IMPORT std_string` for console I/O and string operations, written entirely in UA
 - **Precompiler** — `@IF_ARCH`, `@IF_SYS`, `@ENDIF` conditional compilation; `@IMPORT` with once-only file inclusion; `@DUMMY` stub markers
 - **Six backends** — Intel x86-64 (64-bit), Intel x86-32/IA-32 (32-bit), ARM ARMv7-A (32-bit), ARM64/AArch64 (64-bit, Apple Silicon), RISC-V RV64I+M (64-bit), and Intel 8051/MCS-51 (8-bit embedded)
@@ -143,7 +144,10 @@ gcc -std=c99 -Wall -Wextra -pedantic -o ua.exe \
 UA/
 ├── README.md
 ├── docs/
+│   ├── beginners-guide.md      # Getting started tutorial
 │   ├── language-reference.md   # Full instruction set documentation
+│   ├── mvis-opcodes.md         # Portable MVIS instruction reference
+│   ├── arch-specific-opcodes.md # Non-portable architecture extensions
 │   ├── compiler-usage.md       # CLI reference and examples
 │   └── architecture.md         # Internal design and pipeline
 ├── lib/
@@ -168,7 +172,10 @@ UA/
 
 ## Documentation
 
+- [Beginner's Guide](docs/beginners-guide.md) — getting started tutorial with step-by-step coding examples
 - [Language Reference](docs/language-reference.md) — complete instruction set, register model, syntax, and operand rules
+- [MVIS Opcodes Reference](docs/mvis-opcodes.md) — detailed reference for all 37 portable MVIS instructions
+- [Architecture-Specific Opcodes](docs/arch-specific-opcodes.md) — 14 non-portable opcodes for x86, 8051, ARM/ARM64, and RISC-V
 - [Compiler Usage](docs/compiler-usage.md) — CLI flags, output formats, and usage examples
 - [Architecture](docs/architecture.md) — internal pipeline, two-pass assembly, and backend design
 
