@@ -99,6 +99,7 @@ static const MnemonicEntry MNEMONIC_TABLE[] = {
     { "DMB",   OP_DMB    },
     { "EBREAK",OP_EBREAK },
     { "FENCE", OP_FENCE  },
+    { "ORG",   OP_ORG    },
     { NULL,    OP_COUNT }       /* sentinel */
 };
 
@@ -213,6 +214,7 @@ static const OpcodeShape OPCODE_SHAPES[OP_COUNT] = {
     /* OP_DMB   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
     /* OP_EBREAK*/ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
     /* OP_FENCE */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
+    /* OP_ORG   */ { 1, { OPERAND_IMMEDIATE,  OPERAND_NONE,       OPERAND_NONE } },
 };
 
 /* =========================================================================

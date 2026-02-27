@@ -405,6 +405,9 @@ static int instruction_size_8051(const Instruction *inst)
             return 2;
         case OP_RETI:   return 1;   /* 32 */
 
+        /* ---- Assembler directives ------------------------------------- */
+        case OP_ORG:    return 0;   /* handled specially in pass 1 */
+
         default:
             (void)rd; (void)rs; (void)imm;
             backend_error(inst, "unsupported opcode for 8051 backend");
@@ -489,6 +492,17 @@ static int pass1_build_symbols(const Instruction *ir, int ir_count,
             vtab->count += bsize;  /* reserve bsize bytes */
 
             pc += instruction_size_8051(inst);
+        } else if (inst->opcode == OP_ORG) {
+            /* @ORG <address> — advance PC to the given address */
+            uint32_t target = (uint32_t)inst->operands[0].data.imm;
+            if ((int)target < pc) {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                         "@ORG 0x%04X would move address backwards "
+                         "(current PC = 0x%04X)", target, (unsigned)pc);
+                backend_error(inst, msg);
+            }
+            pc = (int)target;
         } else {
             pc += instruction_size_8051(inst);
         }
@@ -1158,6 +1172,17 @@ static void pass2_emit_code(const Instruction *ir, int ir_count,
         case OP_BUFFER:
             /* Allocation handled in pass 1 — nothing to emit */
             break;
+
+        /* ----------------------------------------------------------------
+         *  ORG addr  — pad with zeros until target address is reached
+         * ---------------------------------------------------------------- */
+        case OP_ORG: {
+            uint32_t target = (uint32_t)inst->operands[0].data.imm;
+            while (buf->size < (int)target) {
+                emit(buf, 0x00);
+            }
+            break;
+        }
 
         /* ----------------------------------------------------------------
          *  SET name, Rs    ->  MOV direct, Rn  [0x88+n, addr]  2 bytes

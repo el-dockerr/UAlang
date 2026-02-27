@@ -179,6 +179,9 @@ static const OpcodeCompliance OPCODE_COMPLIANCE[OP_COUNT] = {
     /* RISC-V exclusive */
     [OP_EBREAK] = { UA_ARISCV,                        UA_SALL  },
     [OP_FENCE]  = { UA_ARISCV,                        UA_SALL  },
+
+    /* Assembler directives — universal */
+    [OP_ORG]    = { UA_AALL,                           UA_SALL  },
 };
 
 /* -------------------------------------------------------------------------

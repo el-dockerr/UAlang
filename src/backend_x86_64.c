@@ -541,6 +541,9 @@ static int instruction_size_x64(const Instruction *inst)
         case OP_RDTSC:  return 2;   /* 0F 31 */
         case OP_BSWAP:  return 3;   /* REX.W 0F C8+rd */
 
+        /* ---- Assembler directives ------------------------------------- */
+        case OP_ORG:    return 0;   /* handled specially in pass 1 */
+
         default:        return 0;
     }
 }
@@ -738,6 +741,16 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count,
             const char *bname = inst->operands[0].data.label;
             int bsize = (int)inst->operands[1].data.imm;
             x64_buftab_add(&buftab, bname, bsize);
+        } else if (inst->opcode == OP_ORG) {
+            /* @ORG <address> — advance PC to the given address */
+            uint32_t target = (uint32_t)inst->operands[0].data.imm;
+            if ((int)target < pc) {
+                fprintf(stderr, "Error: @ORG 0x%X would move address "
+                        "backwards (current PC = 0x%X)\n",
+                        target, (unsigned)pc);
+                exit(1);
+            }
+            pc = (int)target;
         } else if (inst->opcode == OP_LDS) {
             /* Collect string literal */
             x64_strtab_add(&strtab, inst->operands[1].data.string);
@@ -1255,6 +1268,15 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count,
         case OP_BUFFER:
             /* Already handled in pass 1 */
             break;
+
+        /* ---- ORG addr — pad with zeros until target address ----------- */
+        case OP_ORG: {
+            uint32_t target = (uint32_t)inst->operands[0].data.imm;
+            while (code->size < (int)target) {
+                emit_byte(code, 0x00);
+            }
+            break;
+        }
 
         /* ---- SET name, Rs/imm  →  MOV [RIP+disp32], r64/imm ---------- */
         case OP_SET: {

@@ -641,6 +641,9 @@ static int instruction_size_rv(const Instruction *inst)
         case OP_EBREAK: return 4;   /* EBREAK: 00100073 */
         case OP_FENCE:  return 4;   /* FENCE:  0FF0000F */
 
+        /* ---- Assembler directives ------------------------------------- */
+        case OP_ORG:    return 0;   /* handled specially in pass 1 */
+
         default:        return 0;
     }
 }
@@ -813,6 +816,15 @@ CodeBuffer* generate_risc_v(const Instruction *ir, int ir_count)
             const char *bname = inst->operands[0].data.label;
             int bsize = (int)inst->operands[1].data.imm;
             rv_buftab_add(&buftab, bname, bsize);
+        } else if (inst->opcode == OP_ORG) {
+            uint32_t target = (uint32_t)inst->operands[0].data.imm;
+            if ((int)target < pc) {
+                fprintf(stderr, "Error: @ORG 0x%X would move address "
+                        "backwards (current PC = 0x%X)\n",
+                        target, (unsigned)pc);
+                exit(1);
+            }
+            pc = (int)target;
         } else {
             if (inst->opcode == OP_LDS)
                 rv_strtab_add(&strtab, inst->operands[1].data.string);
@@ -1290,6 +1302,15 @@ CodeBuffer* generate_risc_v(const Instruction *ir, int ir_count)
         /* ---- BUFFER — declaration only, no code emitted --------------- */
         case OP_BUFFER:
             break;
+
+        /* ---- ORG addr — pad with zeros until target address ----------- */
+        case OP_ORG: {
+            uint32_t target = (uint32_t)inst->operands[0].data.imm;
+            while (code->size < (int)target) {
+                emit_byte(code, 0x00);
+            }
+            break;
+        }
 
         /* ---- SET name, Rs/imm — store to variable --------------------- */
         case OP_SET: {

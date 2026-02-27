@@ -143,6 +143,40 @@ Unlike `@IF_ARCH`/`@IF_SYS` (which silently skip code), `@ARCH_ONLY`/`@SYS_ONLY`
 
 Prints a diagnostic to stderr during compilation.  No code is emitted.
 
+### Origin Address (`@ORG`)
+
+```asm
+@ORG 0x0000       ; decimal or hex address
+@ORG 0x000B
+```
+
+Sets the **origin address** for subsequent code.  In the generated binary the
+compiler pads the output with zero bytes until the target address is reached.
+
+| Rule | Description |
+|------|-------------|
+| **Forward only** | The target address must be ≥ the current program counter. Moving backwards is a fatal error. |
+| **All architectures** | `@ORG` is universal — it works on every supported backend (x86, x86\_32, ARM, ARM64, RISC-V, MCS-51). |
+| **Bare-metal use case** | Primarily used for placing interrupt vectors and ISRs at hardware-mandated addresses. |
+
+**Example — 8051 interrupt vectors:**
+
+```asm
+@ARCH_ONLY mcs51
+
+@ORG 0x0000          ; reset vector
+    JMP main
+
+@ORG 0x000B          ; Timer 0 interrupt vector
+timer0_isr:
+    ; ... handle interrupt ...
+    RETI
+
+@ORG 0x0030          ; main program
+main:
+    ; initialisation code
+```
+
 ### Opcode Compliance
 
 After parsing, the compiler validates every instruction against a per-opcode compliance table that specifies which architectures and systems support each opcode.  If any instruction is not supported by the target, compilation fails with a clear diagnostic:

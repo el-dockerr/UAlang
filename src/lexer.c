@@ -96,6 +96,7 @@ static const char *OPCODES[] = {
     "DMB",
     "EBREAK",
     "FENCE",
+    "ORG",
     NULL                        /* sentinel */
 };
 

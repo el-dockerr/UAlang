@@ -759,6 +759,9 @@ static int instruction_size_arm(const Instruction *inst)
         case OP_WFI:    return 4;   /* WFI  (cond=AL): E320F003 */
         case OP_DMB:    return 4;   /* DMB SY:         F57FF05F */
 
+        /* ---- Assembler directives ------------------------------------- */
+        case OP_ORG:    return 0;   /* handled specially in pass 1 */
+
         default:        return 0;
     }
 }
@@ -951,6 +954,15 @@ CodeBuffer* generate_arm(const Instruction *ir, int ir_count)
                 bsize = (int)inst->operands[1].data.imm;
             }
             arm_buftab_add(&buftab, bname, bsize);
+        } else if (inst->opcode == OP_ORG) {
+            uint32_t target = (uint32_t)inst->operands[0].data.imm;
+            if ((int)target < pc) {
+                fprintf(stderr, "Error: @ORG 0x%X would move address "
+                        "backwards (current PC = 0x%X)\n",
+                        target, (unsigned)pc);
+                exit(1);
+            }
+            pc = (int)target;
         } else {
             if (inst->opcode == OP_LDS)
                 arm_strtab_add(&strtab, inst->operands[1].data.string);
@@ -1455,6 +1467,15 @@ CodeBuffer* generate_arm(const Instruction *ir, int ir_count)
         /* ---- BUFFER — declaration only, no code emitted --------------- */
         case OP_BUFFER:
             break;
+
+        /* ---- ORG addr — pad with zeros until target address ----------- */
+        case OP_ORG: {
+            uint32_t target = (uint32_t)inst->operands[0].data.imm;
+            while (code->size < (int)target) {
+                emit_byte(code, 0x00);
+            }
+            break;
+        }
 
         /* ---- SET name, Rs/imm — store to variable --------------------- */
         case OP_SET: {

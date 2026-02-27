@@ -1032,6 +1032,34 @@ static int pp_process(const char *source,
                     /* No code emitted — just a blank line */
                     if (strbuf_append_char(output, '\n') != 0) return -1;
                 }
+                /* ---- @ORG <address> ----------------------------------- */
+                else if (pp_casecmp(directive, "ORG") == 0) {
+
+                    /* arg must contain the address (hex 0x... or decimal) */
+                    const char *addr_start = arg;
+                    while (addr_start < line_end &&
+                           (*addr_start == ' ' || *addr_start == '\t'))
+                        addr_start++;
+                    const char *addr_end = addr_start;
+                    while (addr_end < line_end &&
+                           *addr_end != ' ' && *addr_end != '\t' &&
+                           *addr_end != '\r' && *addr_end != '\n')
+                        addr_end++;
+                    if (addr_start == addr_end) {
+                        fprintf(stderr,
+                                "[Precompiler] %s:%d: @ORG requires an "
+                                "address argument\n",
+                                filename, line_num);
+                        return -1;
+                    }
+
+                    /* Emit as: ORG <address>   (for the parser) */
+                    if (strbuf_append(output, "ORG ", 4) != 0) return -1;
+                    if (strbuf_append(output, addr_start,
+                                      (int)(addr_end - addr_start)) != 0)
+                        return -1;
+                    if (strbuf_append_char(output, '\n') != 0) return -1;
+                }
                 /* ---- Unknown @-directive ------------------------------ */
                 else {
                     fprintf(stderr,

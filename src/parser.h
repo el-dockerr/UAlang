@@ -112,6 +112,9 @@ typedef enum {
     OP_EBREAK,          /* EBREAK                   environment breakpoint   */
     OP_FENCE,           /* FENCE                    memory ordering fence    */
 
+    /* --- Assembler Directives ------------------------------------------- */
+    OP_ORG,             /* ORG   #addr              set origin address       */
+
     OP_COUNT            /* Sentinel: total number of opcodes                 */
 } Opcode;
 
