@@ -24,6 +24,13 @@ on:
   push:
     tags:
       - "v*.*.*"
+  release:
+    types: [published]        # fired when a release is created/published via the GitHub UI
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and release (e.g. v1.2.0)'
+        required: true
 
 permissions:
   contents: write          # Required to create GitHub releases
@@ -209,7 +216,14 @@ jobs:
       # ---- Extract tag name for display in release title ----------------
       - name: Set release version
         id: version
-        run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
 
       # ---- Build release notes from CHANGELOG if present, else auto -----
       - name: Build release body
