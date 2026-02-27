@@ -56,6 +56,8 @@ typedef enum {
     OP_JMP,             /* JMP   label              unconditional jump       */
     OP_JZ,              /* JZ    label              jump if zero             */
     OP_JNZ,             /* JNZ   label              jump if not zero         */
+    OP_JL,              /* JL    label              jump if less (signed)    */
+    OP_JG,              /* JG    label              jump if greater (signed) */
     OP_CALL,            /* CALL  label              subroutine call          */
     OP_RET,             /* RET                      return from call         */
 
@@ -80,6 +82,9 @@ typedef enum {
     OP_LOADB,           /* LOADB Rd, Rs              byte load  [Rs] -> Rd    */
     OP_STOREB,          /* STOREB Rs, Rd             byte store Rs  -> [Rd]   */
     OP_SYS,             /* SYS                       native syscall           */
+
+    /* --- Buffer allocation ---------------------------------------------- */
+    OP_BUFFER,          /* BUFFER name, size         allocate N bytes         */
 
     /* --- Miscellaneous -------------------------------------------------- */
     OP_NOP,             /* NOP                      no operation             */

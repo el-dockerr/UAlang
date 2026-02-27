@@ -82,6 +82,8 @@ static const char* A64_REG_NAME[A64_MAX_REG] = {
  * ========================================================================= */
 #define A64_COND_EQ  0x0   /* Equal (Z set)           */
 #define A64_COND_NE  0x1   /* Not equal (Z clear)     */
+#define A64_COND_LT  0xB   /* Signed less than        */
+#define A64_COND_GT  0xC   /* Signed greater than     */
 
 /* =========================================================================
  *  Error helpers
@@ -715,6 +717,8 @@ static int instruction_size_a64(const Instruction *inst)
         case OP_JMP:    return 4;   /* B */
         case OP_JZ:     return 4;   /* B.EQ */
         case OP_JNZ:    return 4;   /* B.NE */
+        case OP_JL:     return 4;   /* B.LT */
+        case OP_JG:     return 4;   /* B.GT */
         case OP_CALL:   return 4;   /* BL */
         case OP_RET:    return 4;   /* RET */
         case OP_PUSH:   return 4;   /* STR pre-indexed */
@@ -725,6 +729,7 @@ static int instruction_size_a64(const Instruction *inst)
 
         /* ---- Variable pseudo-instructions ----------------------------- */
         case OP_VAR:    return 0;
+        case OP_BUFFER: return 0;
         case OP_SET:
             /* SET name, Rs  -> MOVZ+MOVK X9,addr(8) + STR Rs,[X9](4) = 12 */
             if (inst->operands[1].type == OPERAND_REGISTER) return 12;
@@ -762,6 +767,56 @@ typedef struct {
 } A64VarTable;
 
 static void a64_vartab_init(A64VarTable *vt) { vt->count = 0; }
+
+/* =========================================================================
+ *  Buffer table for ARM64  —  collects BUFFER declarations
+ * =========================================================================
+ *  Each buffer is a named zero-initialised region of N bytes.
+ * ========================================================================= */
+#define A64_MAX_BUFS   256
+
+typedef struct {
+    char name[UA_MAX_LABEL_LEN];
+    int  size;
+} A64BufEntry;
+
+typedef struct {
+    A64BufEntry bufs[A64_MAX_BUFS];
+    int         count;
+    int         total_size;
+} A64BufTable;
+
+static void a64_buftab_init(A64BufTable *bt) {
+    bt->count = 0;
+    bt->total_size = 0;
+}
+
+static int a64_buftab_add(A64BufTable *bt, const char *name, int size) {
+    for (int i = 0; i < bt->count; i++) {
+        if (strcmp(bt->bufs[i].name, name) == 0) {
+            fprintf(stderr, "ARM64: duplicate buffer '%s'\n", name);
+            return -1;
+        }
+    }
+    if (bt->count >= A64_MAX_BUFS) {
+        fprintf(stderr, "ARM64: buffer table overflow (max %d)\n",
+                A64_MAX_BUFS);
+        return -1;
+    }
+    A64BufEntry *b = &bt->bufs[bt->count++];
+    strncpy(b->name, name, UA_MAX_LABEL_LEN - 1);
+    b->name[UA_MAX_LABEL_LEN - 1] = '\0';
+    b->size = size;
+    bt->total_size += size;
+    return 0;
+}
+
+static int a64_buftab_has(const A64BufTable *bt, const char *name) {
+    for (int i = 0; i < bt->count; i++) {
+        if (strcmp(bt->bufs[i].name, name) == 0) return 1;
+    }
+    return 0;
+}
 
 /* =========================================================================
  *  String table for ARM64  —  collects LDS string literals
@@ -839,6 +894,9 @@ CodeBuffer* generate_arm64(const Instruction *ir, int ir_count)
     A64VarTable vartab;
     a64_vartab_init(&vartab);
 
+    A64BufTable buftab;
+    a64_buftab_init(&buftab);
+
     A64StringTable strtab;
     a64_strtab_init(&strtab);
 
@@ -857,6 +915,10 @@ CodeBuffer* generate_arm64(const Instruction *ir, int ir_count)
                 has_init = 1;
             }
             a64_vartab_add(&vartab, vname, init_val, has_init);
+        } else if (inst->opcode == OP_BUFFER) {
+            const char *bname = inst->operands[0].data.label;
+            int bsize = (int)inst->operands[1].data.imm;
+            a64_buftab_add(&buftab, bname, bsize);
         } else {
             if (inst->opcode == OP_LDS)
                 a64_strtab_add(&strtab, inst->operands[1].data.string);
@@ -870,7 +932,18 @@ CodeBuffer* generate_arm64(const Instruction *ir, int ir_count)
         a64_symtab_add(&symtab, vartab.vars[v].name,
                        var_base + v * A64_VAR_SIZE);
     }
-    int str_base = var_base + vartab.count * A64_VAR_SIZE;
+
+    /* Register buffer symbols */
+    int buf_base = var_base + vartab.count * A64_VAR_SIZE;
+    {
+        int buf_offset = 0;
+        for (int b = 0; b < buftab.count; b++) {
+            a64_symtab_add(&symtab, buftab.bufs[b].name,
+                           buf_base + buf_offset);
+            buf_offset += buftab.bufs[b].size;
+        }
+    }
+    int str_base = buf_base + buftab.total_size;
 
     /* --- Pass 2: code emission ----------------------------------------- */
     CodeBuffer *code = create_code_buffer();
@@ -1240,6 +1313,28 @@ CodeBuffer* generate_arm64(const Instruction *ir, int ir_count)
             break;
         }
 
+        /* ---- JL label  ->  B.LT label --------------------- 4 bytes --- */
+        case OP_JL: {
+            const char *label = inst->operands[0].data.label;
+            fprintf(stderr, "  JL  %s -> B.LT\n", label);
+            int patch_off = code->size;
+            emit_a64_placeholder(code);
+            a64_add_fixup(&symtab, label, patch_off, patch_off, inst->line,
+                          A64_FIXUP_BCOND, A64_COND_LT);
+            break;
+        }
+
+        /* ---- JG label  ->  B.GT label --------------------- 4 bytes --- */
+        case OP_JG: {
+            const char *label = inst->operands[0].data.label;
+            fprintf(stderr, "  JG  %s -> B.GT\n", label);
+            int patch_off = code->size;
+            emit_a64_placeholder(code);
+            a64_add_fixup(&symtab, label, patch_off, patch_off, inst->line,
+                          A64_FIXUP_BCOND, A64_COND_GT);
+            break;
+        }
+
         /* ---- CALL label  ->  BL label --------------------- 4 bytes --- */
         case OP_CALL: {
             const char *label = inst->operands[0].data.label;
@@ -1301,6 +1396,10 @@ CodeBuffer* generate_arm64(const Instruction *ir, int ir_count)
         case OP_VAR:
             break;
 
+        /* ---- BUFFER — declaration only, no code emitted --------------- */
+        case OP_BUFFER:
+            break;
+
         /* ---- SET name, Rs/imm — store to variable --------------------- */
         case OP_SET: {
             const char *vname = inst->operands[0].data.label;
@@ -1331,7 +1430,7 @@ CodeBuffer* generate_arm64(const Instruction *ir, int ir_count)
             break;
         }
 
-        /* ---- GET Rd, name — load from variable ------------------------ */
+        /* ---- GET Rd, name — load from variable or buffer address ------ */
         case OP_GET: {
             int rd = inst->operands[0].data.reg;
             const char *vname = inst->operands[1].data.label;
@@ -1343,11 +1442,21 @@ CodeBuffer* generate_arm64(const Instruction *ir, int ir_count)
                          "undefined variable '%s'", vname);
                 a64_error(inst, msg);
             }
-            fprintf(stderr, "  GET R%d, %s -> LDR %s, [X9]\n",
-                    rd, vname, A64_REG_NAME[rd]);
-            emit_a64_load_imm32_full(code, A64_REG_SCRATCH,
-                                      (int32_t)var_addr);
-            emit_a64_ldr(code, A64_REG_ENC[rd], A64_REG_SCRATCH);
+            int is_buf = a64_buftab_has(&buftab, vname);
+            if (is_buf) {
+                fprintf(stderr, "  GET R%d, %s -> MOVZ+MOVK %s, #%d (buffer address)\n",
+                        rd, vname, A64_REG_NAME[rd], var_addr);
+                /* Load address into X9, then MOV Xd, X9 */
+                emit_a64_load_imm32_full(code, A64_REG_SCRATCH,
+                                          (int32_t)var_addr);
+                emit_a64_mov_reg(code, A64_REG_ENC[rd], A64_REG_SCRATCH);
+            } else {
+                fprintf(stderr, "  GET R%d, %s -> LDR %s, [X9]\n",
+                        rd, vname, A64_REG_NAME[rd]);
+                emit_a64_load_imm32_full(code, A64_REG_SCRATCH,
+                                          (int32_t)var_addr);
+                emit_a64_ldr(code, A64_REG_ENC[rd], A64_REG_SCRATCH);
+            }
             break;
         }
 
@@ -1487,6 +1596,12 @@ CodeBuffer* generate_arm64(const Instruction *ir, int ir_count)
         }
     }
 
+    /* --- Append buffer data section (zero-filled) --------------------- */
+    for (int b = 0; b < buftab.count; b++) {
+        for (int z = 0; z < buftab.bufs[b].size; z++)
+            emit_byte(code, 0x00);
+    }
+
     /* --- Append string data section ----------------------------------- */
     for (int s = 0; s < strtab.count; s++) {
         const char *p = strtab.strings[s].text;
@@ -1496,8 +1611,9 @@ CodeBuffer* generate_arm64(const Instruction *ir, int ir_count)
         emit_byte(code, 0x00);
     }
 
-    fprintf(stderr, "[ARM64] Emitted %d bytes (%d code + %d var + %d str)\n",
+    fprintf(stderr, "[ARM64] Emitted %d bytes (%d code + %d var + %d buf + %d str)\n",
             code->size, data_start,
-            vartab.count * A64_VAR_SIZE, strtab.total_size);
+            vartab.count * A64_VAR_SIZE, buftab.total_size,
+            strtab.total_size);
     return code;
 }

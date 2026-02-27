@@ -124,6 +124,34 @@ typedef struct {
 } I8051VarTable;
 
 /* =========================================================================
+ *  Buffer name table  —  tracks which names are buffers (not variables)
+ * ========================================================================= */
+#define I8051_MAX_BUFFERS  32
+
+typedef struct {
+    char names[I8051_MAX_BUFFERS][UA_MAX_LABEL_LEN];
+    int  count;
+} I8051BufTable;
+
+static void i8051_buftab_init(I8051BufTable *bt) {
+    bt->count = 0;
+}
+
+static void i8051_buftab_add(I8051BufTable *bt, const char *name) {
+    if (bt->count >= I8051_MAX_BUFFERS) return;
+    strncpy(bt->names[bt->count], name, UA_MAX_LABEL_LEN - 1);
+    bt->names[bt->count][UA_MAX_LABEL_LEN - 1] = '\0';
+    bt->count++;
+}
+
+static int i8051_buftab_has(const I8051BufTable *bt, const char *name) {
+    for (int i = 0; i < bt->count; i++) {
+        if (strcmp(bt->names[i], name) == 0) return 1;
+    }
+    return 0;
+}
+
+/* =========================================================================
  *  CodeBuffer alias  —  local shorthand so existing emit() calls still work
  * ========================================================================= */
 #define emit(buf, byte)  emit_byte(buf, byte)
@@ -285,6 +313,12 @@ static int instruction_size_8051(const Instruction *inst)
         case OP_JNZ:   /* JNZ rel */
             return 2;
 
+        case OP_JL:    /* JC rel */
+            return 2;
+
+        case OP_JG:    /* JC skip + JZ skip + SJMP target */
+            return 6;
+
         case OP_CALL:  /* LCALL addr16 */
             return 3;
 
@@ -334,6 +368,9 @@ static int instruction_size_8051(const Instruction *inst)
             }
             return 0;
 
+        case OP_BUFFER:
+            return 0;   /* declaration only — no bytes emitted */
+
         case OP_SET:
             if (inst->operands[1].type == OPERAND_REGISTER)
                 return 2;   /* MOV direct, Rn    (0x88+n, addr) */
@@ -366,10 +403,12 @@ static int instruction_size_8051(const Instruction *inst)
  *  Pass 1:  Build symbol table
  * ========================================================================= */
 static int pass1_build_symbols(const Instruction *ir, int ir_count,
-                               SymbolTable *st, I8051VarTable *vtab)
+                               SymbolTable *st, I8051VarTable *vtab,
+                               I8051BufTable *buftab)
 {
     symtab_init(st);
     vtab->count = 0;
+    i8051_buftab_init(buftab);
     int pc = 0;    /* program counter (byte offset) */
 
     for (int i = 0; i < ir_count; i++) {
@@ -415,6 +454,26 @@ static int pass1_build_symbols(const Instruction *ir, int ir_count,
             /* Register variable name in symbol table so SET/GET can find it.
              * The "address" here is the direct RAM address (not a PC offset). */
             symtab_add(st, vname, addr);
+
+            pc += instruction_size_8051(inst);
+        } else if (inst->opcode == OP_BUFFER) {
+            /* Allocate consecutive bytes in internal RAM for a buffer */
+            const char *bname = inst->operands[0].data.label;
+            int bsize = (int)inst->operands[1].data.imm;
+            int addr = I8051_VAR_BASE + vtab->count;
+            if (addr + bsize > I8051_VAR_LIMIT) {
+                backend_error(inst,
+                              "BUFFER too large for 8051 internal RAM");
+            }
+            if (symtab_lookup(st, bname) >= 0) {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                         "duplicate buffer '%s'", bname);
+                backend_error(inst, msg);
+            }
+            symtab_add(st, bname, addr);
+            i8051_buftab_add(buftab, bname);
+            vtab->count += bsize;  /* reserve bsize bytes */
 
             pc += instruction_size_8051(inst);
         } else {
@@ -548,7 +607,9 @@ static void emit_lcall(CodeBuffer *buf, uint16_t addr)
  *  Pass 2:  Code emission
  * ========================================================================= */
 static void pass2_emit_code(const Instruction *ir, int ir_count,
-                            const SymbolTable *st, CodeBuffer *buf)
+                            const SymbolTable *st,
+                            const I8051BufTable *buftab,
+                            CodeBuffer *buf)
 {
     for (int i = 0; i < ir_count; i++) {
         const Instruction *inst = &ir[i];
@@ -852,6 +913,60 @@ static void pass2_emit_code(const Instruction *ir, int ir_count,
             break;
 
         /* ----------------------------------------------------------------
+         *  JL label  ->  JC rel   [0x40, rel8]                2 bytes
+         *  After CMP, Carry is set if Ra < Rb (unsigned).
+         * ---------------------------------------------------------------- */
+        case OP_JL:
+            target_addr = symtab_lookup(st, inst->operands[0].data.label);
+            if (target_addr < 0) {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                         "undefined label '%s'",
+                         inst->operands[0].data.label);
+                backend_error(inst, msg);
+            }
+            rel = target_addr - (buf->size + 2);
+            if (rel < -128 || rel > 127) {
+                backend_error(inst,
+                    "JL target out of range for 8-bit relative jump");
+            }
+            emit(buf, 0x40);  /* JC rel */
+            emit(buf, (uint8_t)(rel & 0xFF));
+            break;
+
+        /* ----------------------------------------------------------------
+         *  JG label  ->  polyfill (6 bytes)
+         *  After CMP, Ra > Rb means C==0 AND A!=0.
+         *    JC  $+4   [0x40, 0x04]  — skip if less
+         *    JZ  $+2   [0x60, 0x02]  — skip if equal
+         *    SJMP target [0x80, rel8] — take jump (greater)
+         * ---------------------------------------------------------------- */
+        case OP_JG:
+            target_addr = symtab_lookup(st, inst->operands[0].data.label);
+            if (target_addr < 0) {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                         "undefined label '%s'",
+                         inst->operands[0].data.label);
+                backend_error(inst, msg);
+            }
+            /* JC $+4 (skip SJMP if carry set = less than) */
+            emit(buf, 0x40);       /* JC */
+            emit(buf, 0x04);       /* skip 4 bytes ahead to after SJMP */
+            /* JZ $+2 (skip SJMP if zero = equal) */
+            emit(buf, 0x60);       /* JZ */
+            emit(buf, 0x02);       /* skip 2 bytes ahead to after SJMP */
+            /* SJMP target (greater than) */
+            rel = target_addr - (buf->size + 2);
+            if (rel < -128 || rel > 127) {
+                backend_error(inst,
+                    "JG target out of range for 8-bit relative jump");
+            }
+            emit(buf, 0x80);       /* SJMP */
+            emit(buf, (uint8_t)(rel & 0xFF));
+            break;
+
+        /* ----------------------------------------------------------------
          *  CALL label  ->  LCALL addr16   [0x12, hi, lo]      3 bytes
          * ---------------------------------------------------------------- */
         case OP_CALL:
@@ -1025,6 +1140,13 @@ static void pass2_emit_code(const Instruction *ir, int ir_count,
         }
 
         /* ----------------------------------------------------------------
+         *  BUFFER name, size  —  declaration only, no bytes emitted
+         * ---------------------------------------------------------------- */
+        case OP_BUFFER:
+            /* Allocation handled in pass 1 — nothing to emit */
+            break;
+
+        /* ----------------------------------------------------------------
          *  SET name, Rs    ->  MOV direct, Rn  [0x88+n, addr]  2 bytes
          *  SET name, #imm  ->  MOV direct,#imm [0x75, addr, imm] 3 bytes
          * ---------------------------------------------------------------- */
@@ -1056,6 +1178,7 @@ static void pass2_emit_code(const Instruction *ir, int ir_count,
 
         /* ----------------------------------------------------------------
          *  GET Rd, name  ->  MOV Rn, direct  [0xA8+n, addr]   2 bytes
+         *  For buffers:  MOV Rn, #addr     [0x78+n, addr]   2 bytes
          * ---------------------------------------------------------------- */
         case OP_GET: {
             rd = inst->operands[0].data.reg;
@@ -1068,9 +1191,15 @@ static void pass2_emit_code(const Instruction *ir, int ir_count,
                          "undefined variable '%s'", vname);
                 backend_error(inst, msg);
             }
-            /* MOV Rn, direct : 0xA8+n, direct */
-            emit(buf, (uint8_t)(0xA8 + rd));
-            emit(buf, (uint8_t)addr);
+            if (i8051_buftab_has(buftab, vname)) {
+                /* Load buffer ADDRESS as immediate */
+                emit(buf, (uint8_t)(0x78 + rd));  /* MOV Rn, #imm */
+                emit(buf, (uint8_t)addr);
+            } else {
+                /* Load variable VALUE from direct address */
+                emit(buf, (uint8_t)(0xA8 + rd));  /* MOV Rn, direct */
+                emit(buf, (uint8_t)addr);
+            }
             break;
         }
 
@@ -1154,7 +1283,8 @@ CodeBuffer* generate_8051(const Instruction *ir, int ir_count)
     /* --- Pass 1: symbol table + variable table ------------------------- */
     SymbolTable    symtab;
     I8051VarTable  vtab;
-    int total_size = pass1_build_symbols(ir, ir_count, &symtab, &vtab);
+    I8051BufTable  buftab;
+    int total_size = pass1_build_symbols(ir, ir_count, &symtab, &vtab, &buftab);
 
     fprintf(stderr, "[8051] Symbol table (%d entries):\n", symtab.count);
     for (int i = 0; i < symtab.count; i++) {
@@ -1186,7 +1316,7 @@ CodeBuffer* generate_8051(const Instruction *ir, int ir_count)
         return NULL;
     }
 
-    pass2_emit_code(ir, ir_count, &symtab, code);
+    pass2_emit_code(ir, ir_count, &symtab, &buftab, code);
 
     fprintf(stderr, "[8051] Emitted %d bytes (expected %d)\n",
             code->size, total_size);

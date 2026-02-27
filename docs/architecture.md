@@ -122,7 +122,7 @@ The lexer performs single-pass, left-to-right scanning of the source text. It pr
 
 | Type | Examples | Description |
 |------|---------|-------------|
-| `TOKEN_OPCODE` | `ADD`, `LDI`, `JMP` | One of the 34 recognized mnemonics |
+| `TOKEN_OPCODE` | `ADD`, `LDI`, `JMP` | One of the 37 recognized mnemonics |
 | `TOKEN_REGISTER` | `R0`, `R15`, `r7` | Register name (case-insensitive) |
 | `TOKEN_NUMBER` | `42`, `0xFF`, `0b1010` | Numeric literal |
 | `TOKEN_LABEL` | `loop:`, `start:` | Label definition (with colon) |
@@ -137,7 +137,7 @@ The lexer performs single-pass, left-to-right scanning of the source text. It pr
 
 1. Skip whitespace (spaces, tabs)
 2. If `;` → consume to end of line, emit `TOKEN_COMMENT`
-3. If letter → read identifier, check against `OPCODES[]` table (34 entries) → emit `TOKEN_OPCODE` or `TOKEN_IDENTIFIER`; if followed by `:`, emit `TOKEN_LABEL`
+3. If letter → read identifier, check against `OPCODES[]` table (37 entries) → emit `TOKEN_OPCODE` or `TOKEN_IDENTIFIER`; if followed by `:`, emit `TOKEN_LABEL`
 4. If digit or `-` → read number (decimal, `0x` hex, `0b` binary) → emit `TOKEN_NUMBER`
 5. If `,` → emit `TOKEN_COMMA`
 6. If `#` → emit `TOKEN_HASH`
@@ -257,6 +257,8 @@ Notable sizes:
 | `DIV Rd, Rs` | 13 | PUSH RDX + MOV + CQO + IDIV + MOV + POP RDX |
 | `JMP label` | 5 | JMP rel32 |
 | `JZ label` | 6 | JZ rel32 (0x0F 0x84) |
+| `JL label` | 6 | JL rel32 (0x0F 0x8C) |
+| `JG label` | 6 | JG rel32 (0x0F 0x8F) |
 | `CALL label` | 5 | CALL rel32 |
 | `INC Rd` | 3 | REX.W + FF /0 |
 | `NOP` | 1 | 0x90 |
@@ -265,6 +267,7 @@ Notable sizes:
 | `LOADB Rd, Rs` | 4–5 | MOVZX r64, byte [r64] (RSP/RBP need SIB/disp8) |
 | `STOREB Rs, Rd` | 2–3 | MOV byte [r64], r8 (RSP/RBP need SIB/disp8) |
 | `SYS` | 2 | SYSCALL (0x0F 0x05) |
+| `BUFFER name, size` | 0 | Directive — allocates zero-initialized bytes in data section |
 
 #### Pass 2: Code Emission
 
@@ -300,10 +303,10 @@ for (each fixup) {
 
 Each backend maintains a **string table** for `LDS` instructions. During pass 1, all string literals are collected into a de-duplicated table. Identical strings share the same offset, saving space.
 
-The string table is appended after variable data in the output binary:
+The string table is appended after buffer data (and variable data) in the output binary:
 
 ```
-[ code (pass 2 output) ][ variable data ][ string data ]
+[ code (pass 2 output) ][ variable data ][ buffer data ][ string data ]
 ```
 
 The `LDS` instruction loads the absolute or RIP-relative address of the string into a register. For x86-64, this uses `LEA r64, [RIP+disp32]` where the displacement is patched to point into the string section. The string data includes a null terminator for each entry.
@@ -345,7 +348,7 @@ X32_REG_ENC[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 | `MUL Rd, Rs` | 3 | `IMUL r32, r/m32` (`0F AF`) |
 | `DIV Rd, Rs` | 9 | PUSH EDX + MOV + CDQ + IDIV + MOV + POP EDX |
 | `JMP label` | 5 | `JMP rel32` |
-| `JZ/JNZ label` | 6 | `0F 84/85 rel32` |
+| `JZ/JNZ label` | 6 | `0F 84/85 rel32` |\n| `JL label` | 6 | `0F 8C rel32` |\n| `JG label` | 6 | `0F 8F rel32` |
 | `INC/DEC Rd` | 1 | Single-byte `40+rd`/`48+rd` |
 | `PUSH/POP Rd` | 1 | Single-byte `50+rd`/`58+rd` |
 | `NOP` | 1 | `90` |
@@ -388,6 +391,8 @@ All instructions use the condition field AL (0xE = always execute) in bits [31:2
 | `JMP label` | `B label` | Branch (cond=AL, 24-bit signed offset) |
 | `JZ label` | `BEQ label` | Branch (cond=EQ) |
 | `JNZ label` | `BNE label` | Branch (cond=NE) |
+| `JL label` | `BLT label` | Branch (cond=LT, 0xB) |
+| `JG label` | `BGT label` | Branch (cond=GT, 0xC) |
 | `CALL label` | `BL label` | Branch with Link |
 | `RET` | `BX LR` | Branch and Exchange to return address |
 | `PUSH Rs` | `STR Rs, [SP, #-4]!` | Pre-indexed store with writeback |
@@ -491,7 +496,7 @@ A64_REG_ENC[8] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 
 #### Branch Offsets
 
-AArch64 branches use a 26-bit signed offset (in words), giving a range of ±128 MB. Conditional branches (`B.EQ`, `B.NE`) use a 19-bit signed offset (±1 MB).
+AArch64 branches use a 26-bit signed offset (in words), giving a range of ±128 MB. Conditional branches (`B.EQ`, `B.NE`, `B.LT`, `B.GT`) use a 19-bit signed offset (±1 MB).
 
 ### RISC-V (RV64I+M) Backend
 

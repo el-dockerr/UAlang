@@ -219,6 +219,8 @@ static uint32_t rv_j_type(int32_t offset, uint8_t rd, uint8_t opcode)
 /* funct3 for branches */
 #define RV_F3_BEQ     0x0
 #define RV_F3_BNE     0x1
+#define RV_F3_BLT     0x4
+#define RV_F3_BGE     0x5
 
 /* funct3 for loads */
 #define RV_F3_LW      0x2   /* 32-bit load  */
@@ -485,7 +487,9 @@ typedef struct {
     int   line;
     int   fixup_type;       /* RV_FIXUP_JAL or RV_FIXUP_BRANCH          */
     uint8_t rd;             /* rd field for JAL (x0 or x1)              */
-    uint8_t funct3;         /* funct3 for branch type (BEQ/BNE)         */
+    uint8_t funct3;         /* funct3 for branch type (BEQ/BNE/BLT)     */
+    uint8_t rs1;            /* rs1 for branch (usually t0 or x0)        */
+    uint8_t rs2;            /* rs2 for branch (usually x0 or t0)        */
 } RVFixup;
 
 typedef struct {
@@ -524,7 +528,8 @@ static int rv_symtab_lookup(const RVSymTab *st, const char *name)
 
 static void rv_add_fixup(RVSymTab *st, const char *label,
                           int patch_offset, int instr_addr, int line,
-                          int fixup_type, uint8_t rd, uint8_t funct3)
+                          int fixup_type, uint8_t rd, uint8_t funct3,
+                          uint8_t rs1, uint8_t rs2)
 {
     if (st->fix_count >= RV_MAX_FIXUPS) {
         fprintf(stderr, "RISC-V: fixup table overflow\n");
@@ -539,6 +544,8 @@ static void rv_add_fixup(RVSymTab *st, const char *label,
     f->fixup_type   = fixup_type;
     f->rd           = rd;
     f->funct3       = funct3;
+    f->rs1          = rs1;
+    f->rs2          = rs2;
 }
 
 /* =========================================================================
@@ -600,6 +607,8 @@ static int instruction_size_rv(const Instruction *inst)
         case OP_JMP:    return 4;   /* JAL x0, offset */
         case OP_JZ:     return 4;   /* BEQ t0, x0, offset */
         case OP_JNZ:    return 4;   /* BNE t0, x0, offset */
+        case OP_JL:     return 4;   /* BLT t0, x0, offset */
+        case OP_JG:     return 4;   /* BLT x0, t0, offset */
         case OP_CALL:   return 4;   /* JAL ra, offset */
         case OP_RET:    return 4;   /* JALR x0, ra, 0 */
         case OP_PUSH:   return 8;   /* ADDI sp, sp, -8 + SD */
@@ -610,6 +619,7 @@ static int instruction_size_rv(const Instruction *inst)
 
         /* ---- Variable pseudo-instructions ----------------------------- */
         case OP_VAR:    return 0;   /* declaration only */
+        case OP_BUFFER: return 0;   /* declaration only */
         case OP_SET:
             /* SET name, Rs  -> LUI+ADDI t0,addr(8) + SD Rs,0(t0)(4) = 12 */
             if (inst->operands[1].type == OPERAND_REGISTER) return 12;
@@ -670,6 +680,54 @@ static void rv_strtab_init(RVStringTable *st) {
     st->total_size = 0;
 }
 
+/* =========================================================================
+ *  Buffer table for RISC-V  —  BUFFER name, size (contiguous byte allocs)
+ * =========================================================================*/
+#define RV_MAX_BUFFERS  256
+
+typedef struct {
+    char name[UA_MAX_LABEL_LEN];
+    int  size;   /* byte count */
+} RVBufEntry;
+
+typedef struct {
+    RVBufEntry bufs[RV_MAX_BUFFERS];
+    int        count;
+    int        total_size;  /* sum of all buffer sizes */
+} RVBufTable;
+
+static void rv_buftab_init(RVBufTable *bt) {
+    bt->count = 0;
+    bt->total_size = 0;
+}
+
+static int rv_buftab_add(RVBufTable *bt, const char *name, int size) {
+    for (int i = 0; i < bt->count; i++) {
+        if (strcmp(bt->bufs[i].name, name) == 0) {
+            fprintf(stderr, "RISC-V: duplicate buffer '%s'\n", name);
+            return -1;
+        }
+    }
+    if (bt->count >= RV_MAX_BUFFERS) {
+        fprintf(stderr, "RISC-V: buffer table overflow (max %d)\n",
+                RV_MAX_BUFFERS);
+        return -1;
+    }
+    RVBufEntry *b = &bt->bufs[bt->count++];
+    strncpy(b->name, name, UA_MAX_LABEL_LEN - 1);
+    b->name[UA_MAX_LABEL_LEN - 1] = '\0';
+    b->size = size;
+    bt->total_size += size;
+    return 0;
+}
+
+static int rv_buftab_has(const RVBufTable *bt, const char *name) {
+    for (int i = 0; i < bt->count; i++) {
+        if (strcmp(bt->bufs[i].name, name) == 0) return 1;
+    }
+    return 0;
+}
+
 static int rv_strtab_add(RVStringTable *st, const char *text) {
     for (int i = 0; i < st->count; i++)
         if (strcmp(st->strings[i].text, text) == 0) return i;
@@ -727,6 +785,9 @@ CodeBuffer* generate_risc_v(const Instruction *ir, int ir_count)
     RVStringTable strtab;
     rv_strtab_init(&strtab);
 
+    RVBufTable buftab;
+    rv_buftab_init(&buftab);
+
     int pc = 0;
     for (int i = 0; i < ir_count; i++) {
         const Instruction *inst = &ir[i];
@@ -742,6 +803,10 @@ CodeBuffer* generate_risc_v(const Instruction *ir, int ir_count)
                 has_init = 1;
             }
             rv_vartab_add(&vartab, vname, init_val, has_init);
+        } else if (inst->opcode == OP_BUFFER) {
+            const char *bname = inst->operands[0].data.label;
+            int bsize = (int)inst->operands[1].data.imm;
+            rv_buftab_add(&buftab, bname, bsize);
         } else {
             if (inst->opcode == OP_LDS)
                 rv_strtab_add(&strtab, inst->operands[1].data.string);
@@ -755,7 +820,20 @@ CodeBuffer* generate_risc_v(const Instruction *ir, int ir_count)
         rv_symtab_add(&symtab, vartab.vars[v].name,
                       var_base + v * RV_VAR_SIZE);
     }
-    int str_base = var_base + vartab.count * RV_VAR_SIZE;
+
+    /* Register buffer symbols: each lives after variables */
+    int buf_base = var_base + vartab.count * RV_VAR_SIZE;
+    {
+        int buf_offset = 0;
+        for (int b = 0; b < buftab.count; b++) {
+            rv_symtab_add(&symtab, buftab.bufs[b].name,
+                          buf_base + buf_offset);
+            buf_offset += buftab.bufs[b].size;
+        }
+    }
+
+    /* String data lives after variables and buffers */
+    int str_base = buf_base + buftab.total_size;
 
     /* --- Pass 2: code emission ----------------------------------------- */
     CodeBuffer *code = create_code_buffer();
@@ -1083,7 +1161,7 @@ CodeBuffer* generate_risc_v(const Instruction *ir, int ir_count)
             int patch_off = code->size;
             emit_rv_placeholder(code);
             rv_add_fixup(&symtab, label, patch_off, patch_off, inst->line,
-                         RV_FIXUP_JAL, RV_REG_ZERO, 0);
+                         RV_FIXUP_JAL, RV_REG_ZERO, 0, 0, 0);
             break;
         }
 
@@ -1094,7 +1172,8 @@ CodeBuffer* generate_risc_v(const Instruction *ir, int ir_count)
             int patch_off = code->size;
             emit_rv_placeholder(code);
             rv_add_fixup(&symtab, label, patch_off, patch_off, inst->line,
-                         RV_FIXUP_BRANCH, 0, RV_F3_BEQ);
+                         RV_FIXUP_BRANCH, 0, RV_F3_BEQ,
+                         RV_REG_T0, RV_REG_ZERO);
             break;
         }
 
@@ -1105,7 +1184,33 @@ CodeBuffer* generate_risc_v(const Instruction *ir, int ir_count)
             int patch_off = code->size;
             emit_rv_placeholder(code);
             rv_add_fixup(&symtab, label, patch_off, patch_off, inst->line,
-                         RV_FIXUP_BRANCH, 0, RV_F3_BNE);
+                         RV_FIXUP_BRANCH, 0, RV_F3_BNE,
+                         RV_REG_T0, RV_REG_ZERO);
+            break;
+        }
+
+        /* ---- JL label  ->  BLT t0, x0, offset ----------- 4 bytes ---- */
+        case OP_JL: {
+            const char *label = inst->operands[0].data.label;
+            fprintf(stderr, "  JL  %s -> BLT t0, x0\n", label);
+            int patch_off = code->size;
+            emit_rv_placeholder(code);
+            rv_add_fixup(&symtab, label, patch_off, patch_off, inst->line,
+                         RV_FIXUP_BRANCH, 0, RV_F3_BLT,
+                         RV_REG_T0, RV_REG_ZERO);
+            break;
+        }
+
+        /* ---- JG label  ->  BLT x0, t0, offset ----------- 4 bytes ---- */
+        /*  RISC-V has no BGT; use BLT with swapped operands.             */
+        case OP_JG: {
+            const char *label = inst->operands[0].data.label;
+            fprintf(stderr, "  JG  %s -> BLT x0, t0\n", label);
+            int patch_off = code->size;
+            emit_rv_placeholder(code);
+            rv_add_fixup(&symtab, label, patch_off, patch_off, inst->line,
+                         RV_FIXUP_BRANCH, 0, RV_F3_BLT,
+                         RV_REG_ZERO, RV_REG_T0);
             break;
         }
 
@@ -1116,7 +1221,7 @@ CodeBuffer* generate_risc_v(const Instruction *ir, int ir_count)
             int patch_off = code->size;
             emit_rv_placeholder(code);
             rv_add_fixup(&symtab, label, patch_off, patch_off, inst->line,
-                         RV_FIXUP_JAL, RV_REG_RA, 0);
+                         RV_FIXUP_JAL, RV_REG_RA, 0, 0, 0);
             break;
         }
 
@@ -1176,6 +1281,10 @@ CodeBuffer* generate_risc_v(const Instruction *ir, int ir_count)
         case OP_VAR:
             break;
 
+        /* ---- BUFFER — declaration only, no code emitted --------------- */
+        case OP_BUFFER:
+            break;
+
         /* ---- SET name, Rs/imm — store to variable --------------------- */
         case OP_SET: {
             const char *vname = inst->operands[0].data.label;
@@ -1209,7 +1318,7 @@ CodeBuffer* generate_risc_v(const Instruction *ir, int ir_count)
             break;
         }
 
-        /* ---- GET Rd, name — load from variable ------------------------ */
+        /* ---- GET Rd, name — load from variable or buffer address ------ */
         case OP_GET: {
             int rd = inst->operands[0].data.reg;
             const char *vname = inst->operands[1].data.label;
@@ -1221,12 +1330,21 @@ CodeBuffer* generate_risc_v(const Instruction *ir, int ir_count)
                          "undefined variable '%s'", vname);
                 rv_error(inst, msg);
             }
-            fprintf(stderr, "  GET R%d, %s -> LD %s, [t0]\n",
-                    rd, vname, RV_REG_NAME[rd]);
-            /* Load address into t0 */
-            emit_rv_load_imm_full(code, RV_REG_T0, (int32_t)var_addr);
-            /* LD Rd, 0(t0) */
-            emit_rv_ld(code, RV_REG_ENC[rd], RV_REG_T0, 0);
+            int is_buf = rv_buftab_has(&buftab, vname);
+            if (is_buf) {
+                fprintf(stderr, "  GET R%d, %s -> LUI+ADDI %s (buffer address)\n",
+                        rd, vname, RV_REG_NAME[rd]);
+                /* Load address into t0, then MV Rd, t0 */
+                emit_rv_load_imm_full(code, RV_REG_T0, (int32_t)var_addr);
+                emit_rv_addi(code, RV_REG_ENC[rd], RV_REG_T0, 0);
+            } else {
+                fprintf(stderr, "  GET R%d, %s -> LD %s, [t0]\n",
+                        rd, vname, RV_REG_NAME[rd]);
+                /* Load address into t0 */
+                emit_rv_load_imm_full(code, RV_REG_T0, (int32_t)var_addr);
+                /* LD Rd, 0(t0) */
+                emit_rv_ld(code, RV_REG_ENC[rd], RV_REG_T0, 0);
+            }
             break;
         }
 
@@ -1321,7 +1439,7 @@ CodeBuffer* generate_risc_v(const Instruction *ir, int ir_count)
                 free_code_buffer(code);
                 return NULL;
             }
-            uint32_t word = rv_b_type(offset, RV_REG_ZERO, RV_REG_T0,
+            uint32_t word = rv_b_type(offset, fix->rs2, fix->rs1,
                                        fix->funct3, RV_OP_BRANCH);
             patch_rv_word(code, fix->patch_offset, word);
         }
@@ -1336,6 +1454,13 @@ CodeBuffer* generate_risc_v(const Instruction *ir, int ir_count)
         }
     }
 
+    /* --- Append buffer data section (zero-initialised) ----------------- */
+    for (int b = 0; b < buftab.count; b++) {
+        for (int i = 0; i < buftab.bufs[b].size; i++) {
+            emit_byte(code, 0x00);
+        }
+    }
+
     /* --- Append string data section ----------------------------------- */
     for (int s = 0; s < strtab.count; s++) {
         const char *p = strtab.strings[s].text;
@@ -1345,8 +1470,8 @@ CodeBuffer* generate_risc_v(const Instruction *ir, int ir_count)
         emit_byte(code, 0x00);
     }
 
-    fprintf(stderr, "[RISC-V] Emitted %d bytes (%d code + %d var + %d str)\n",
+    fprintf(stderr, "[RISC-V] Emitted %d bytes (%d code + %d var + %d buf + %d str)\n",
             code->size, data_start,
-            vartab.count * RV_VAR_SIZE, strtab.total_size);
+            vartab.count * RV_VAR_SIZE, buftab.total_size, strtab.total_size);
     return code;
 }

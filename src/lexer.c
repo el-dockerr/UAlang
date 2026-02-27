@@ -78,6 +78,9 @@ static const char *OPCODES[] = {
     "LOADB",
     "STOREB",
     "SYS",
+    "JL",
+    "JG",
+    "BUFFER",
     NULL                        /* sentinel */
 };
 

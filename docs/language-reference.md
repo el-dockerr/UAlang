@@ -26,6 +26,7 @@ This document is the complete reference for the **Unified Assembly (UA)** instru
    - [Stack Operations](#stack-operations)
    - [System](#system)
    - [Variables](#variable-instructions)
+   - [Memory Allocation](#memory-allocation)
 12. [Operand Rules](#operand-rules)
 13. [Backend-Specific Notes](#backend-specific-notes)
 
@@ -510,11 +511,79 @@ String manipulation functions. Uses architecture-neutral MVIS instructions and w
     CALL std_string.strlen   ; R1 = 4
 ```
 
+### std_math
+
+Integer math utility functions. Architecture-neutral — works on all backends.
+
+| Function | Description |
+|----------|-------------|
+| `std_math.pow` | Integer exponentiation. Set `std_math.base` and `std_math.exp`, then `CALL std_math.pow`. Result in R0. |
+| `std_math.factorial` | Compute n!. Set `std_math.n`, then `CALL std_math.factorial`. Result in R0. |
+| `std_math.max` | Return the larger of two values. Set `std_math.a` and `std_math.b`, then `CALL std_math.max`. Result in R0. |
+| `std_math.abs` | Absolute value. Set `std_math.val`, then `CALL std_math.abs`. Result in R0. |
+
+**Example:**
+
+```asm
+@IMPORT std_math
+
+    ; Compute 2^10 = 1024
+    SET  std_math.base, 2
+    SET  std_math.exp, 10
+    CALL std_math.pow        ; R0 = 1024
+
+    ; Compute 5! = 120
+    SET  std_math.n, 5
+    CALL std_math.factorial  ; R0 = 120
+
+    ; max(7, 42) = 42
+    SET  std_math.a, 7
+    SET  std_math.b, 42
+    CALL std_math.max        ; R0 = 42
+
+    ; abs(-15) = 15
+    SET  std_math.val, -15
+    CALL std_math.abs        ; R0 = 15
+```
+
+### std_arrays
+
+Byte-array utility functions for working with `BUFFER`-allocated memory. Architecture-neutral — works on all backends.
+
+| Function | Description |
+|----------|-------------|
+| `std_arrays.fill_bytes` | Fill a buffer region with a byte value. Set `std_arrays.dst` (address), `std_arrays.count` (length), `std_arrays.value` (byte). |
+| `std_arrays.copy_bytes` | Copy bytes between buffers. Set `std_arrays.src` (source address), `std_arrays.dst` (dest address), `std_arrays.count` (length). |
+
+**Example:**
+
+```asm
+@IMPORT std_arrays
+
+    BUFFER  my_buf, 32
+
+    ; Fill 32 bytes with 0xFF
+    GET  R0, my_buf
+    SET  std_arrays.dst, R0
+    SET  std_arrays.count, 32
+    SET  std_arrays.value, 0xFF
+    CALL std_arrays.fill_bytes
+
+    ; Copy first 16 bytes of my_buf to another location
+    BUFFER  other_buf, 16
+    GET  R0, my_buf
+    SET  std_arrays.src, R0
+    GET  R0, other_buf
+    SET  std_arrays.dst, R0
+    SET  std_arrays.count, 16
+    CALL std_arrays.copy_bytes
+```
+
 ---
 
 ## Instruction Set
 
-UA defines 34 instructions organized into eight categories. This is the **Minimum Viable Instruction Set (MVIS)**.
+UA defines 37 instructions organized into nine categories. This is the **Minimum Viable Instruction Set (MVIS)**.
 
 ### Data Movement
 
@@ -644,7 +713,7 @@ These instructions are essential for traversing null-terminated strings characte
 |----------|--------|-------------|
 | `CMP` | `CMP Ra, Rb` or `CMP Ra, #imm` | Compare Ra with Rb/imm (sets flags) |
 
-`CMP` performs a subtraction without storing the result. The flags (zero, carry) are set and used by subsequent conditional jumps (`JZ`, `JNZ`).
+`CMP` performs a subtraction without storing the result. The flags (zero, carry, sign) are set and used by subsequent conditional jumps (`JZ`, `JNZ`, `JL`, `JG`).
 
 **Example:**
 
@@ -652,6 +721,8 @@ These instructions are essential for traversing null-terminated strings characte
     CMP   R0, R1
     JZ    equal          ; jump if R0 == R1
     JNZ   not_equal      ; jump if R0 != R1
+    JL    less           ; jump if R0 < R1 (signed)
+    JG    greater        ; jump if R0 > R1 (signed)
 ```
 
 > **8051 Note:** Register comparison uses `CLR C; SUBB A,Rn`. Immediate comparison uses `CJNE A,#imm,$+3`.
@@ -661,8 +732,10 @@ These instructions are essential for traversing null-terminated strings characte
 | Mnemonic | Syntax | Description |
 |----------|--------|-------------|
 | `JMP` | `JMP label` | Unconditional jump |
-| `JZ` | `JZ label` | Jump if zero flag is set |
-| `JNZ` | `JNZ label` | Jump if zero flag is clear |
+| `JZ` | `JZ label` | Jump if zero flag is set (equal after CMP) |
+| `JNZ` | `JNZ label` | Jump if zero flag is clear (not equal after CMP) |
+| `JL` | `JL label` | Jump if less (signed, after CMP) |
+| `JG` | `JG label` | Jump if greater (signed, after CMP) |
 | `CALL` | `CALL label` | Call subroutine (pushes return address) |
 | `RET` | `RET` | Return from subroutine |
 
@@ -677,9 +750,15 @@ my_function:
     RET
 ```
 
-> **x86-64 Note:** `JMP`, `JZ`, `JNZ`, and `CALL` use 32-bit relative offsets (rel32), allowing jumps up to ±2 GB.
+> **x86-64 Note:** `JMP`, `JZ`, `JNZ`, `JL`, `JG`, and `CALL` use 32-bit relative offsets (rel32), allowing jumps up to ±2 GB. `JL` emits `0F 8C rel32` (JL near), `JG` emits `0F 8F rel32` (JG near).
 >
-> **8051 Note:** `JMP` and `CALL` use 16-bit absolute addresses (`LJMP`/`LCALL`). `JZ` and `JNZ` use 8-bit relative offsets (range: -128 to +127 bytes from the next instruction).
+> **ARM Note:** `JL` emits `BLT` (condition code 0xB), `JG` emits `BGT` (condition code 0xC). Both use 24-bit signed offsets (±32 MB).
+>
+> **ARM64 Note:** `JL` emits `B.LT` (condition 0xB), `JG` emits `B.GT` (condition 0xC). Both use 19-bit signed offsets (±1 MB).
+>
+> **RISC-V Note:** `JL` emits `BLT t0, x0` (branch if scratch < 0 after CMP subtraction). `JG` emits `BLT x0, t0` (swapped operands: branch if 0 < scratch, i.e., result > 0). Both use B-type encoding with a 12-bit signed offset.
+>
+> **8051 Note:** `JMP` and `CALL` use 16-bit absolute addresses (`LJMP`/`LCALL`). `JZ` and `JNZ` use 8-bit relative offsets (range: -128 to +127 bytes). `JL` emits `JC rel8` (2 bytes — carry flag is set by `SUBB` if the first operand is less). `JG` uses a 6-byte polyfill: `JC $+4; JZ $+2; SJMP target` (skip if less or equal, jump if strictly greater).
 
 ### Stack Operations
 
@@ -759,6 +838,46 @@ my_function:
 >
 > **8051 Note:** Variables occupy one byte each in internal RAM (direct addresses 0x08–0x7F). `SET`/`GET` use direct-addressing MOV instructions. Maximum 120 variables.
 
+### Memory Allocation
+
+| Mnemonic | Syntax | Description |
+|----------|--------|-------------|
+| `BUFFER` | `BUFFER name, size` | Allocate a named contiguous byte buffer of the given size |
+
+`BUFFER` reserves a contiguous block of zero-initialized bytes in the data section (or internal RAM on 8051). Unlike `VAR` (which stores a single word), `BUFFER` allocates an arbitrary number of bytes.
+
+**Example:**
+
+```asm
+    BUFFER  my_buf, 64       ; allocate 64 bytes named "my_buf"
+    GET     R0, my_buf       ; R0 = address of the buffer
+    LDI     R1, 0x41         ; 'A'
+    STOREB  R1, R0           ; write 'A' to first byte
+```
+
+`BUFFER` names follow the same rules as variable and label names. The `size` operand is a mandatory immediate specifying the number of bytes to allocate.
+
+**Storage Model:**
+
+| Backend | Storage | Location |
+|---------|---------|----------|
+| x86-64 | Data section after code | After variables, before strings (8-byte aligned start address) |
+| x86-32 | Data section after code | After variables, before strings |
+| ARM | Data section after code | After variables, before strings |
+| ARM64 | Data section after code | After variables, before strings |
+| RISC-V | Data section after code | After variables, before strings |
+| 8051 | Internal RAM | Consecutive bytes starting after variables (0x08+) |
+
+The data layout with buffers is:
+
+```
+[ code section ][ variable data ][ buffer data ][ string data ]
+```
+
+Accessing buffer contents uses `GET` to obtain the base address, then `LOADB`/`STOREB` with register arithmetic for byte-level access.
+
+> **8051 Note:** Buffer bytes are allocated in internal RAM (direct addresses). Since 8051 RAM is limited to ~120 usable bytes, buffer sizes must be modest. Buffers share the address space with variables.
+
 ---
 
 ## Operand Rules
@@ -783,7 +902,7 @@ Each instruction has a fixed **operand shape** enforced at parse time:
 | CMP | reg, reg_or_imm |
 | NOT, INC, DEC | reg |
 | PUSH, POP | reg |
-| JMP, JZ, JNZ, CALL | label |
+| JMP, JZ, JNZ, JL, JG, CALL | label |
 | INT | imm |
 | NOP, HLT, RET, SYS | *(none)* |
 | LDS | reg, string |
@@ -791,6 +910,7 @@ Each instruction has a fixed **operand shape** enforced at parse time:
 | VAR | name [, imm] |
 | SET | name, reg_or_imm |
 | GET | reg, name |
+| BUFFER | name, size |
 
 Incorrect operand shapes produce a compile-time error with the source line number.
 
@@ -806,6 +926,8 @@ Incorrect operand shapes produce a compile-time error with the source line numbe
 - `SHL`/`SHR` with a register operand saves/restores RCX (shift amount must be in CL)
 - `LOAD`/`STORE` handle the RSP (SIB byte) and RBP (displacement byte) special cases
 - `HLT` emits `RET` (0xC3) — returns control to the JIT runner or OS
+- `JL` emits `0F 8C rel32` (6 bytes), `JG` emits `0F 8F rel32` (6 bytes)
+- `BUFFER` allocates zero-initialized bytes in the data section after variables
 
 ### x86-32 (IA-32)
 
@@ -817,6 +939,8 @@ Incorrect operand shapes produce a compile-time error with the source line numbe
 - `SHL`/`SHR` with a register operand saves/restores ECX
 - `LOAD`/`STORE` handle the ESP (SIB byte) and EBP (displacement byte) special cases
 - `HLT` emits `RET` (0xC3)
+- `JL` emits `0F 8C rel32` (6 bytes), `JG` emits `0F 8F rel32` (6 bytes)
+- `BUFFER` allocates zero-initialized bytes in the data section after variables
 - No JIT support — use `-arch x86` for JIT execution
 
 ### ARM (ARMv7-A)
@@ -844,6 +968,9 @@ Incorrect operand shapes produce a compile-time error with the source line numbe
 - `MUL`/`DIV` use the `MUL AB` / `DIV AB` hardware instructions via the B register
 - `SHL`/`SHR` use rotate instructions (`RL A` / `RR A`) — bits wrap around
 - `JZ`/`JNZ` are limited to ±127 bytes (8-bit relative offset)
+- `JL` emits `JC rel8` (2 bytes — carry flag set by `SUBB` means less-than)
+- `JG` uses a 6-byte polyfill: `JC $+4; JZ $+2; SJMP target` (skip if less or equal, jump if strictly greater)
+- `BUFFER` allocates consecutive bytes in internal RAM (shares address space with variables)
 - `JMP`/`CALL` use 16-bit absolute addressing (`LJMP`/`LCALL`)
 - `INT #n` is polyfilled as `LCALL (n*8)+3` (standard interrupt vector table layout)
 - `HLT` emits `SJMP $` (0x80, 0xFE) — infinite self-loop

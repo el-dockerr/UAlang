@@ -467,6 +467,54 @@ echo $?
 
 The ELF emitter automatically appends a `sys_exit` stub, so `HLT` → `RET` cleanly exits the process with the value in R0.
 
+### Example 10: Conditional Jumps (JL / JG)
+
+```asm
+; clamp.UA — clamp R0 to the range [10, 100]
+    LDI  R0, 150         ; test value
+    LDI  R1, 10
+    LDI  R2, 100
+
+    CMP  R0, R1
+    JL   too_low          ; if R0 < 10, jump to too_low
+    CMP  R0, R2
+    JG   too_high         ; if R0 > 100, jump to too_high
+    JMP  done
+
+too_low:
+    MOV  R0, R1           ; R0 = 10
+    JMP  done
+
+too_high:
+    MOV  R0, R2           ; R0 = 100
+
+done:
+    HLT                   ; R0 = 100
+```
+
+```bash
+UA clamp.UA -arch x86 --run
+# Output: RAX (R0) = 100  (0x64)
+```
+
+### Example 11: Buffer Allocation
+
+```asm
+; buffer.UA — allocate a buffer and fill the first byte
+    BUFFER  data, 32          ; allocate 32 zero-initialized bytes
+    GET     R0, data          ; R0 = address of buffer
+    LDI     R1, 0x42          ; 'B'
+    STOREB  R1, R0            ; write 'B' to first byte
+    LOADB   R2, R0            ; R2 = 0x42
+    MOV     R0, R2
+    HLT                       ; R0 = 0x42
+```
+
+```bash
+UA buffer.UA -arch x86 --run
+# Output: RAX (R0) = 66  (0x42)
+```
+
 ---
 
 ## Exit Codes
@@ -496,14 +544,14 @@ Common errors:
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `unknown mnemonic` | Typo in opcode name | Check spelling against the 34 supported opcodes |
+| `unknown mnemonic` | Typo in opcode name | Check spelling against the 37 supported opcodes |
 | `wrong number of operands` | Incorrect operand count | See the operand shape table in the language reference |
 | `expected register` | Non-register where register required | Use `R0`–`R7` |
 | `register out of range` | Register index > 7 | Use R0–R7 only |
 | `immediate out of range` | Value too large for backend | 8051: -128..255; x86: 32-bit |
 | `undefined label` | Jumping to a non-existent label | Define the label somewhere in the file |
 | `duplicate label` | Same label defined twice | Rename one of the labels |
-| `JZ/JNZ target out of range` | 8051: jump > ±127 bytes | Move the target label closer or restructure code |
+| `JZ/JNZ/JL target out of range` | 8051: jump > ±127 bytes | Move the target label closer or restructure code |
 
 ---
 

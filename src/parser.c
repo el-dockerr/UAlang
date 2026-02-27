@@ -81,6 +81,9 @@ static const MnemonicEntry MNEMONIC_TABLE[] = {
     { "LOADB", OP_LOADB },
     { "STOREB",OP_STOREB},
     { "SYS",   OP_SYS   },
+    { "JL",    OP_JL    },
+    { "JG",    OP_JG    },
+    { "BUFFER",OP_BUFFER},
     { NULL,    OP_COUNT }       /* sentinel */
 };
 
@@ -161,6 +164,8 @@ static const OpcodeShape OPCODE_SHAPES[OP_COUNT] = {
     /* OP_JMP   */ { 1, { OPERAND_LABEL_REF, OPERAND_NONE,       OPERAND_NONE } },
     /* OP_JZ    */ { 1, { OPERAND_LABEL_REF, OPERAND_NONE,       OPERAND_NONE } },
     /* OP_JNZ   */ { 1, { OPERAND_LABEL_REF, OPERAND_NONE,       OPERAND_NONE } },
+    /* OP_JL    */ { 1, { OPERAND_LABEL_REF, OPERAND_NONE,       OPERAND_NONE } },
+    /* OP_JG    */ { 1, { OPERAND_LABEL_REF, OPERAND_NONE,       OPERAND_NONE } },
     /* OP_CALL  */ { 1, { OPERAND_LABEL_REF, OPERAND_NONE,       OPERAND_NONE } },
     /* OP_RET   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
     /* OP_PUSH  */ { 1, { OPERAND_REGISTER,  OPERAND_NONE,       OPERAND_NONE } },
@@ -175,6 +180,7 @@ static const OpcodeShape OPCODE_SHAPES[OP_COUNT] = {
     /* OP_LOADB */ { 2, { OPERAND_REGISTER,  OPERAND_REGISTER,   OPERAND_NONE } },
     /* OP_STOREB*/ { 2, { OPERAND_REGISTER,  OPERAND_REGISTER,   OPERAND_NONE } },
     /* OP_SYS   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
+    /* OP_BUFFER*/ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } }, /* special */
     /* OP_NOP   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
     /* OP_HLT   */ { 0, { OPERAND_NONE,      OPERAND_NONE,       OPERAND_NONE } },
 };
@@ -238,6 +244,8 @@ const char* opcode_name(Opcode op)
         case OP_JMP:   return "JMP";
         case OP_JZ:    return "JZ";
         case OP_JNZ:   return "JNZ";
+        case OP_JL:    return "JL";
+        case OP_JG:    return "JG";
         case OP_CALL:  return "CALL";
         case OP_RET:   return "RET";
         case OP_PUSH:  return "PUSH";
@@ -254,6 +262,7 @@ const char* opcode_name(Opcode op)
         case OP_LOADB: return "LOADB";
         case OP_STOREB:return "STOREB";
         case OP_SYS:   return "SYS";
+        case OP_BUFFER:return "BUFFER";
         default:       return "???";
     }
 }
@@ -578,6 +587,44 @@ Instruction* parse(const Token *tokens, int token_count,
                             "after 'VAR name,'");
                     }
                 }
+
+                goto emit_instruction;
+            }
+
+            /* =============================================================
+             *  BUFFER name, size
+             *  Allocate a contiguous byte buffer.  Operand 0 = label (name),
+             *  operand 1 = immediate (byte count, mandatory).
+             * ============================================================= */
+            if (op == OP_BUFFER) {
+                const Token *name_tok = peek(tokens, pos, token_count);
+                if (name_tok->type != TOKEN_IDENTIFIER &&
+                    name_tok->type != TOKEN_LABEL_REF) {
+                    syntax_error_expected(name_tok, "buffer name",
+                                          "after 'BUFFER'");
+                }
+                inst.operands[0].type = OPERAND_LABEL_REF;
+                strncpy(inst.operands[0].data.label,
+                        name_tok->text, UA_MAX_LABEL_LEN - 1);
+                inst.operands[0].data.label[UA_MAX_LABEL_LEN - 1] = '\0';
+                pos++;
+
+                const Token *comma = peek(tokens, pos, token_count);
+                if (comma->type != TOKEN_COMMA) {
+                    syntax_error_expected(comma, "','",
+                                          "after 'BUFFER name'");
+                }
+                pos++;
+
+                const Token *size_tok = peek(tokens, pos, token_count);
+                if (size_tok->type != TOKEN_NUMBER) {
+                    syntax_error_expected(size_tok, "size (number)",
+                                          "for 'BUFFER name, size'");
+                }
+                inst.operands[1].type     = OPERAND_IMMEDIATE;
+                inst.operands[1].data.imm = size_tok->value;
+                inst.operand_count = 2;
+                pos++;
 
                 goto emit_instruction;
             }

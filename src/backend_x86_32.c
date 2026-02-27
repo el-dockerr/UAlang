@@ -467,6 +467,8 @@ static int instruction_size_x32(const Instruction *inst)
         case OP_JMP:    return 5;   /* E9 rel32 */
         case OP_JZ:     return 6;   /* 0F 84 rel32 */
         case OP_JNZ:    return 6;   /* 0F 85 rel32 */
+        case OP_JL:     return 6;   /* 0F 8C rel32 */
+        case OP_JG:     return 6;   /* 0F 8F rel32 */
         case OP_CALL:   return 5;   /* E8 rel32 */
         case OP_RET:    return 1;
         case OP_PUSH:   return 1;
@@ -477,6 +479,7 @@ static int instruction_size_x32(const Instruction *inst)
 
         /* ---- Variable pseudo-instructions ----------------------------- */
         case OP_VAR:    return 0;   /* declaration only */
+        case OP_BUFFER: return 0;   /* declaration only */
         case OP_SET:
             /* SET name, Rs  ->  MOV [disp32], r32  (6 bytes)
              * SET name, imm ->  MOV [disp32], imm32 (10 bytes) */
@@ -519,6 +522,54 @@ typedef struct {
 } X32VarTable;
 
 static void x32_vartab_init(X32VarTable *vt) { vt->count = 0; }
+
+/* =========================================================================
+ *  Buffer table for x86-32  — BUFFER name, size
+ * ========================================================================= */
+#define X32_MAX_BUFFERS  256
+
+typedef struct {
+    char name[UA_MAX_LABEL_LEN];
+    int  size;
+} X32BufEntry;
+
+typedef struct {
+    X32BufEntry bufs[X32_MAX_BUFFERS];
+    int         count;
+    int         total_size;
+} X32BufTable;
+
+static void x32_buftab_init(X32BufTable *bt) {
+    bt->count = 0;
+    bt->total_size = 0;
+}
+
+static int x32_buftab_add(X32BufTable *bt, const char *name, int size) {
+    for (int i = 0; i < bt->count; i++) {
+        if (strcmp(bt->bufs[i].name, name) == 0) {
+            fprintf(stderr, "x86-32: duplicate buffer '%s'\n", name);
+            return -1;
+        }
+    }
+    if (bt->count >= X32_MAX_BUFFERS) {
+        fprintf(stderr, "x86-32: buffer table overflow (max %d)\n",
+                X32_MAX_BUFFERS);
+        return -1;
+    }
+    X32BufEntry *b = &bt->bufs[bt->count++];
+    strncpy(b->name, name, UA_MAX_LABEL_LEN - 1);
+    b->name[UA_MAX_LABEL_LEN - 1] = '\0';
+    b->size = size;
+    bt->total_size += size;
+    return 0;
+}
+
+static int x32_buftab_has(const X32BufTable *bt, const char *name) {
+    for (int i = 0; i < bt->count; i++) {
+        if (strcmp(bt->bufs[i].name, name) == 0) return 1;
+    }
+    return 0;
+}
 
 /* =========================================================================
  *  String table for x86-32  — collects LDS string literals
@@ -601,6 +652,9 @@ CodeBuffer* generate_x86_32(const Instruction *ir, int ir_count)
     X32StringTable strtab;
     x32_strtab_init(&strtab);
 
+    X32BufTable buftab;
+    x32_buftab_init(&buftab);
+
     int pc = 0;
     for (int i = 0; i < ir_count; i++) {
         const Instruction *inst = &ir[i];
@@ -616,6 +670,10 @@ CodeBuffer* generate_x86_32(const Instruction *ir, int ir_count)
                 has_init = 1;
             }
             x32_vartab_add(&vartab, vname, init_val, has_init);
+        } else if (inst->opcode == OP_BUFFER) {
+            const char *bname = inst->operands[0].data.label;
+            int bsize = (int)inst->operands[1].data.imm;
+            x32_buftab_add(&buftab, bname, bsize);
         } else {
             /* Collect LDS string literals */
             if (inst->opcode == OP_LDS)
@@ -630,7 +688,17 @@ CodeBuffer* generate_x86_32(const Instruction *ir, int ir_count)
         x32_symtab_add(&symtab, vartab.vars[v].name,
                         var_base + v * X32_VAR_SIZE);
     }
-    int str_base = var_base + vartab.count * X32_VAR_SIZE;
+    /* Register buffer symbols: after variables */
+    int buf_base = var_base + vartab.count * X32_VAR_SIZE;
+    {
+        int buf_offset = 0;
+        for (int b = 0; b < buftab.count; b++) {
+            x32_symtab_add(&symtab, buftab.bufs[b].name,
+                            buf_base + buf_offset);
+            buf_offset += buftab.bufs[b].size;
+        }
+    }
+    int str_base = buf_base + buftab.total_size;
 
     /* --- Pass 2: code emission ----------------------------------------- */
     CodeBuffer *code = create_code_buffer();
@@ -993,6 +1061,30 @@ CodeBuffer* generate_x86_32(const Instruction *ir, int ir_count)
             break;
         }
 
+        /* ---- JL label  ->  JL rel32 (0F 8C) --------------- 6 bytes -- */
+        case OP_JL: {
+            const char *label = inst->operands[0].data.label;
+            fprintf(stderr, "  JL  %s\n", label);
+            emit_byte(code, 0x0F);
+            emit_byte(code, 0x8C);
+            int patch_off = code->size;
+            emit_rel32_placeholder(code);
+            x32_add_fixup(&symtab, label, patch_off, code->size, inst->line);
+            break;
+        }
+
+        /* ---- JG label  ->  JG rel32 (0F 8F) --------------- 6 bytes -- */
+        case OP_JG: {
+            const char *label = inst->operands[0].data.label;
+            fprintf(stderr, "  JG  %s\n", label);
+            emit_byte(code, 0x0F);
+            emit_byte(code, 0x8F);
+            int patch_off = code->size;
+            emit_rel32_placeholder(code);
+            x32_add_fixup(&symtab, label, patch_off, code->size, inst->line);
+            break;
+        }
+
         /* ---- CALL label  ->  CALL rel32 -------------------- 5 bytes -- */
         case OP_CALL: {
             const char *label = inst->operands[0].data.label;
@@ -1052,6 +1144,10 @@ CodeBuffer* generate_x86_32(const Instruction *ir, int ir_count)
         case OP_VAR:
             break;
 
+        /* ---- BUFFER — declaration only, no code emitted --------------- */
+        case OP_BUFFER:
+            break;
+
         /* ---- SET name, Rs/imm → MOV [disp32], r32/imm32 -------------- */
         case OP_SET: {
             const char *vname = inst->operands[0].data.label;
@@ -1084,15 +1180,22 @@ CodeBuffer* generate_x86_32(const Instruction *ir, int ir_count)
             break;
         }
 
-        /* ---- GET Rd, name → MOV r32, [disp32] ------------------------- */
+        /* ---- GET Rd, name → MOV r32, [disp32] or LEA (buffer) --------- */
         case OP_GET: {
             int rd = inst->operands[0].data.reg;
             const char *vname = inst->operands[1].data.label;
             x32_validate_register(inst, rd);
             uint8_t enc = X32_REG_ENC[rd];
-            fprintf(stderr, "  GET R%d, %s -> MOV %s, [disp32]\n",
-                    rd, vname, X32_REG_NAME[rd]);
-            emit_byte(code, 0x8B);  /* MOV r32, r/m32 */
+            int is_buf = x32_buftab_has(&buftab, vname);
+            if (is_buf) {
+                fprintf(stderr, "  GET R%d, %s -> LEA %s, [disp32] (buffer address)\n",
+                        rd, vname, X32_REG_NAME[rd]);
+                emit_byte(code, 0x8D);  /* LEA r32, [disp32] */
+            } else {
+                fprintf(stderr, "  GET R%d, %s -> MOV %s, [disp32]\n",
+                        rd, vname, X32_REG_NAME[rd]);
+                emit_byte(code, 0x8B);  /* MOV r32, r/m32 */
+            }
             emit_byte(code, (uint8_t)((enc << 3) | 0x05));  /* ModRM: [disp32] */
             int patch_off = code->size;
             emit_rel32_placeholder(code);
@@ -1207,6 +1310,13 @@ CodeBuffer* generate_x86_32(const Instruction *ir, int ir_count)
         emit_byte(code, (uint8_t)((val >> 24) & 0xFF));
     }
 
+    /* --- Append buffer data section (zero-initialised) ----------------- */
+    for (int b = 0; b < buftab.count; b++) {
+        for (int i = 0; i < buftab.bufs[b].size; i++) {
+            emit_byte(code, 0x00);
+        }
+    }
+
     /* --- Append string data section ------------------------------------ */
     for (int s = 0; s < strtab.count; s++) {
         const char *p = strtab.strings[s].text;
@@ -1216,8 +1326,8 @@ CodeBuffer* generate_x86_32(const Instruction *ir, int ir_count)
         emit_byte(code, 0x00);  /* null terminator */
     }
 
-    fprintf(stderr, "[x86-32] Emitted %d bytes (%d code + %d var + %d str)\n",
+    fprintf(stderr, "[x86-32] Emitted %d bytes (%d code + %d var + %d buf + %d str)\n",
             code->size, var_base, vartab.count * X32_VAR_SIZE,
-            strtab.total_size);
+            buftab.total_size, strtab.total_size);
     return code;
 }

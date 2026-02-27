@@ -78,6 +78,8 @@ static const char* ARM_REG_NAME[ARM_MAX_REG] = {
 #define ARM_COND_EQ  0x0   /* Equal (Z set)           */
 #define ARM_COND_NE  0x1   /* Not equal (Z clear)     */
 #define ARM_COND_AL  0xE   /* Always                  */
+#define ARM_COND_LT  0xB   /* Signed less than (N!=V) */
+#define ARM_COND_GT  0xC   /* Signed greater than (Z==0 && N==V) */
 
 /* =========================================================================
  *  Error helpers
@@ -724,6 +726,8 @@ static int instruction_size_arm(const Instruction *inst)
         case OP_JMP:    return 4;   /* B rel24 */
         case OP_JZ:     return 4;   /* BEQ rel24 */
         case OP_JNZ:    return 4;   /* BNE rel24 */
+        case OP_JL:     return 4;   /* BLT rel24 */
+        case OP_JG:     return 4;   /* BGT rel24 */
         case OP_CALL:   return 4;   /* BL rel24 */
         case OP_RET:    return 4;   /* BX LR */
         case OP_PUSH:   return 4;
@@ -734,6 +738,7 @@ static int instruction_size_arm(const Instruction *inst)
 
         /* ---- Variable pseudo-instructions ----------------------------- */
         case OP_VAR:    return 0;   /* declaration only */
+        case OP_BUFFER: return 0;   /* declaration only */
         case OP_SET:
             /* SET name, Rs  -> MOVW+MOVT r12,addr + STR Rs,[r12] (12) */
             if (inst->operands[1].type == OPERAND_REGISTER) return 12;
@@ -828,6 +833,53 @@ static int arm_strtab_add(ARMStringTable *st, const char *text) {
     return idx;
 }
 
+/* =========================================================================
+ *  Buffer table for ARM  —  collects BUFFER declarations
+ *  Buffer data is appended after variable data in the output.
+ * ========================================================================= */
+#define ARM_MAX_BUFFERS  256
+
+typedef struct {
+    char name[UA_MAX_LABEL_LEN];
+    int  size;
+} ARMBufEntry;
+
+typedef struct {
+    ARMBufEntry bufs[ARM_MAX_BUFFERS];
+    int         count;
+    int         total_size;
+} ARMBufTable;
+
+static void arm_buftab_init(ARMBufTable *bt) {
+    bt->count = 0;
+    bt->total_size = 0;
+}
+
+static int arm_buftab_add(ARMBufTable *bt, const char *name, int size) {
+    for (int i = 0; i < bt->count; i++)
+        if (strcmp(bt->bufs[i].name, name) == 0) {
+            fprintf(stderr, "ARM: duplicate buffer '%s'\n", name);
+            return -1;
+        }
+    if (bt->count >= ARM_MAX_BUFFERS) {
+        fprintf(stderr, "ARM: buffer table overflow\n");
+        return -1;
+    }
+    ARMBufEntry *b = &bt->bufs[bt->count++];
+    strncpy(b->name, name, UA_MAX_LABEL_LEN - 1);
+    b->name[UA_MAX_LABEL_LEN - 1] = '\0';
+    b->size = size;
+    bt->total_size += size;
+    return 0;
+}
+
+static int arm_buftab_has(const ARMBufTable *bt, const char *name) {
+    for (int i = 0; i < bt->count; i++) {
+        if (strcmp(bt->bufs[i].name, name) == 0) return 1;
+    }
+    return 0;
+}
+
 static int arm_vartab_add(ARMVarTable *vt, const char *name,
                           int32_t init_value, int has_init)
 {
@@ -868,6 +920,9 @@ CodeBuffer* generate_arm(const Instruction *ir, int ir_count)
     ARMStringTable strtab;
     arm_strtab_init(&strtab);
 
+    ARMBufTable buftab;
+    arm_buftab_init(&buftab);
+
     int pc = 0;
     for (int i = 0; i < ir_count; i++) {
         const Instruction *inst = &ir[i];
@@ -883,6 +938,14 @@ CodeBuffer* generate_arm(const Instruction *ir, int ir_count)
                 has_init = 1;
             }
             arm_vartab_add(&vartab, vname, init_val, has_init);
+        } else if (inst->opcode == OP_BUFFER) {
+            const char *bname = inst->operands[0].data.label;
+            int bsize = 0;
+            if (inst->operand_count >= 2 &&
+                inst->operands[1].type == OPERAND_IMMEDIATE) {
+                bsize = (int)inst->operands[1].data.imm;
+            }
+            arm_buftab_add(&buftab, bname, bsize);
         } else {
             if (inst->opcode == OP_LDS)
                 arm_strtab_add(&strtab, inst->operands[1].data.string);
@@ -896,7 +959,16 @@ CodeBuffer* generate_arm(const Instruction *ir, int ir_count)
         arm_symtab_add(&symtab, vartab.vars[v].name,
                        var_base + v * ARM_VAR_SIZE);
     }
-    int str_base = var_base + vartab.count * ARM_VAR_SIZE;
+    int buf_base = var_base + vartab.count * ARM_VAR_SIZE;
+    {
+        int buf_offset = 0;
+        for (int b = 0; b < buftab.count; b++) {
+            arm_symtab_add(&symtab, buftab.bufs[b].name,
+                           buf_base + buf_offset);
+            buf_offset += buftab.bufs[b].size;
+        }
+    }
+    int str_base = buf_base + buftab.total_size;
 
     /* --- Pass 2: code emission ----------------------------------------- */
     CodeBuffer *code = create_code_buffer();
@@ -1292,6 +1364,28 @@ CodeBuffer* generate_arm(const Instruction *ir, int ir_count)
             break;
         }
 
+        /* ---- JL label  ->  BLT label ----------------------- 4 bytes -- */
+        case OP_JL: {
+            const char *label = inst->operands[0].data.label;
+            fprintf(stderr, "  JL  %s -> BLT\n", label);
+            int patch_off = code->size;
+            emit_arm_branch_placeholder(code);
+            arm_add_fixup(&symtab, label, patch_off, patch_off, inst->line,
+                          0, ARM_COND_LT);
+            break;
+        }
+
+        /* ---- JG label  ->  BGT label ----------------------- 4 bytes -- */
+        case OP_JG: {
+            const char *label = inst->operands[0].data.label;
+            fprintf(stderr, "  JG  %s -> BGT\n", label);
+            int patch_off = code->size;
+            emit_arm_branch_placeholder(code);
+            arm_add_fixup(&symtab, label, patch_off, patch_off, inst->line,
+                          0, ARM_COND_GT);
+            break;
+        }
+
         /* ---- CALL label  ->  BL label ---------------------- 4 bytes -- */
         case OP_CALL: {
             const char *label = inst->operands[0].data.label;
@@ -1353,6 +1447,10 @@ CodeBuffer* generate_arm(const Instruction *ir, int ir_count)
         case OP_VAR:
             break;
 
+        /* ---- BUFFER — declaration only, no code emitted --------------- */
+        case OP_BUFFER:
+            break;
+
         /* ---- SET name, Rs/imm — store to variable --------------------- */
         case OP_SET: {
             const char *vname = inst->operands[0].data.label;
@@ -1388,7 +1486,7 @@ CodeBuffer* generate_arm(const Instruction *ir, int ir_count)
             break;
         }
 
-        /* ---- GET Rd, name — load from variable ------------------------ */
+        /* ---- GET Rd, name — load from variable or buffer address ------ */
         case OP_GET: {
             int rd = inst->operands[0].data.reg;
             const char *vname = inst->operands[1].data.label;
@@ -1400,13 +1498,23 @@ CodeBuffer* generate_arm(const Instruction *ir, int ir_count)
                          "undefined variable '%s'", vname);
                 arm_error(inst, msg);
             }
-            fprintf(stderr, "  GET R%d, %s -> LDR %s, [r12]\n",
-                    rd, vname, ARM_REG_NAME[rd]);
-            /* Load address into r12 */
-            emit_arm_load_imm32_full(code, ARM_REG_IP,
-                                     (int32_t)var_addr);
-            /* LDR Rd, [r12] */
-            emit_arm_ldr(code, ARM_REG_ENC[rd], ARM_REG_IP);
+            int is_buf = arm_buftab_has(&buftab, vname);
+            if (is_buf) {
+                fprintf(stderr, "  GET R%d, %s -> MOVW+MOVT %s, #%d (buffer address)\n",
+                        rd, vname, ARM_REG_NAME[rd], var_addr);
+                /* Load address into r12, then MOV Rd, r12 */
+                emit_arm_load_imm32_full(code, ARM_REG_IP,
+                                         (int32_t)var_addr);
+                emit_arm_mov_reg(code, ARM_REG_ENC[rd], ARM_REG_IP);
+            } else {
+                fprintf(stderr, "  GET R%d, %s -> LDR %s, [r12]\n",
+                        rd, vname, ARM_REG_NAME[rd]);
+                /* Load address into r12 */
+                emit_arm_load_imm32_full(code, ARM_REG_IP,
+                                         (int32_t)var_addr);
+                /* LDR Rd, [r12] */
+                emit_arm_ldr(code, ARM_REG_ENC[rd], ARM_REG_IP);
+            }
             break;
         }
 
@@ -1532,6 +1640,11 @@ CodeBuffer* generate_arm(const Instruction *ir, int ir_count)
         emit_byte(code, (uint8_t)((val >> 24) & 0xFF));
     }
 
+    /* --- Append buffer data section (zero-filled) -------------------- */
+    for (int b = 0; b < buftab.count; b++)
+        for (int i = 0; i < buftab.bufs[b].size; i++)
+            emit_byte(code, 0x00);
+
     /* --- Append string data section ----------------------------------- */
     for (int s = 0; s < strtab.count; s++) {
         const char *p = strtab.strings[s].text;
@@ -1541,8 +1654,9 @@ CodeBuffer* generate_arm(const Instruction *ir, int ir_count)
         emit_byte(code, 0x00);
     }
 
-    fprintf(stderr, "[ARM] Emitted %d bytes (%d code + %d var + %d str)\n",
+    fprintf(stderr, "[ARM] Emitted %d bytes (%d code + %d var + %d buf + %d str)\n",
             code->size, data_start,
-            vartab.count * ARM_VAR_SIZE, strtab.total_size);
+            vartab.count * ARM_VAR_SIZE, buftab.total_size,
+            strtab.total_size);
     return code;
 }
