@@ -8,11 +8,13 @@
  *           file imports, and stub markers.
  *
  *  Directives:
- *    @IF_ARCH <arch>     Include block only when -arch matches
- *    @IF_SYS  <system>   Include block only when -sys matches
- *    @ENDIF              Close an @IF_ARCH / @IF_SYS block
- *    @IMPORT  <path>     Include another .ua file (imported at most once)
- *    @DUMMY   [message]  Mark a stub; print diagnostic to stderr
+ *    @IF_ARCH <arch>      Include block only when -arch matches
+ *    @IF_SYS  <system>    Include block only when -sys matches
+ *    @ENDIF               Close an @IF_ARCH / @IF_SYS block
+ *    @IMPORT  <path>      Include another .ua file (imported at most once)
+ *    @DUMMY   [message]   Mark a stub; print diagnostic to stderr
+ *    @arch_only <a>,<b>   Abort compilation unless -arch matches one entry
+ *    @sys_only  <s>,<t>   Abort compilation unless -sys  matches one entry
  *
  *  License: MIT
  * =============================================================================

@@ -211,6 +211,55 @@ Output during compilation:
 [Precompiler] DUMMY program.ua:13: (no implementation)
 ```
 
+### `@arch_only <arch1>, <arch2>, ...`
+
+Abort compilation unless the current `-arch` matches **at least one** of the comma-separated architecture names (case-insensitive).  This is a hard guard — compilation stops immediately with an error if the target is not in the list.
+
+```asm
+@arch_only x86, x86_32    ; only compile for x86 family
+SYS                        ; uses native SYSCALL / INT 0x80
+```
+
+Error when compiling with `-arch arm`:
+
+```
+[Precompiler] file.ua:1: @arch_only — current architecture 'arm' is not in
+  the supported set [x86, x86_32]
+```
+
+Valid architecture names: `x86`, `x86_32`, `arm`, `arm64`, `riscv`, `mcs51`.
+
+### `@sys_only <sys1>, <sys2>, ...`
+
+Abort compilation unless the current `-sys` matches **at least one** of the comma-separated system names (case-insensitive).  If no `-sys` was specified on the command line, this directive always fails.
+
+```asm
+@sys_only linux, macos     ; POSIX targets only
+SYS                        ; uses SYSCALL / SVC #0
+```
+
+Error when compiling with `-sys win32`:
+
+```
+[Precompiler] file.ua:1: @sys_only — current system 'win32' is not in
+  the supported set [linux, macos]
+```
+
+Valid system names: `baremetal`, `win32`, `linux`, `macos`.
+
+### Opcode Compliance Validation
+
+After parsing, and before backend code generation, the compiler runs an **opcode compliance check**.  Every instruction in the IR is verified against a per-opcode table of supported architectures and systems.  If any opcode is not valid for the target, the build fails:
+
+```
+  UA Compliance Error
+  -------------------
+  Line 5: opcode 'SYS' is not supported on architecture 'mcs51'
+  Supported architectures: x86, x86_32, arm, arm64, riscv
+```
+
+All 37 built-in opcodes are currently universal.  The compliance infrastructure is in place for future architecture-specific instructions.
+
 ---
 
 ## Output Formats

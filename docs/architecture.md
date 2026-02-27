@@ -53,6 +53,12 @@ UA uses a classic five-stage pipeline. Each stage is a pure function that transf
        │
        ▼
  ┌───────────────┐
+ │  Compliance   │   validate_opcode_compliance()
+ │   main.c      │──────────────► Pass / Fail
+ └───────────────┘   (checks every opcode against arch/sys bitmask table)
+       │
+       ▼
+ ┌───────────────┐
  │   Backend     │   generate_x86_64() / generate_x86_32() / generate_arm()
  │ backend_*.c   │   generate_arm64() / generate_risc_v() / generate_8051()
  └───────────────┘────────────────► CodeBuffer
@@ -66,7 +72,7 @@ UA uses a classic five-stage pipeline. Each stage is a pure function that transf
  └───────────────┘
 ```
 
-Each stage is independent: the precompiler knows nothing about tokens, the lexer knows nothing about architectures, the parser knows nothing about machine encodings, and the backends know nothing about file formats.
+Each stage is independent: the precompiler knows nothing about tokens, the lexer knows nothing about architectures, the parser knows nothing about machine encodings, the compliance checker bridges the IR and target config, and the backends know nothing about file formats.
 
 ---
 
@@ -85,6 +91,8 @@ The precompiler runs before the lexer and performs a text-to-text transformation
 | `@ENDIF` | Pop one conditional level |
 | `@IMPORT <path>` | Include another `.ua` file (at most once per unique path) |
 | `@DUMMY [message]` | Emit a stub diagnostic to stderr; no code generated |
+| `@arch_only <a>,<b>,...` | Abort compilation unless `-arch` matches one listed name |
+| `@sys_only <s>,<t>,...` | Abort compilation unless `-sys` matches one listed name |
 
 ### Conditional Nesting
 
@@ -109,6 +117,17 @@ Import depth is limited to 16 levels to prevent circular references.
 ### Line Preservation
 
 Directive lines and inactive (conditionally excluded) lines are replaced by blank lines in the output.  This preserves line numbering so that subsequent lexer/parser error messages reference correct line numbers in the original source file.
+
+### Architecture & System Guards
+
+`@arch_only` and `@sys_only` are processed in active regions (they are not conditional-nesting directives).  When encountered:
+
+1. Parse the comma-separated list of architecture/system names
+2. Compare each token (case-insensitive) against the current `-arch`/`-sys`
+3. If **none** match → print a diagnostic and return `-1` (fatal error)
+4. If a match is found → emit a blank line and continue normally
+
+For `@sys_only`, if no `-sys` flag was specified on the command line, the directive always fails with a dedicated error message.
 
 ---
 

@@ -14,6 +14,8 @@
  *  │  @ENDIF               Pop one conditional level                        │
  *  │  @IMPORT  <path>      Include file (skipped if already imported)       │
  *  │  @DUMMY   [message]   Emit a diagnostic stub marker to stderr          │
+ *  │  @arch_only <a>,<b>   Abort unless -arch matches at least one entry    │
+ *  │  @sys_only  <s>,<t>   Abort unless -sys  matches at least one entry    │
  *  │                                                                        │
  *  │  Processing order:                                                     │
  *  │    1. Line-by-line scan of the source                                  │
@@ -837,6 +839,169 @@ static int pp_process(const char *source,
                     }
 
                     /* Blank line for the @IMPORT directive itself */
+                    if (strbuf_append_char(output, '\n') != 0) return -1;
+                }
+                /* ---- @arch_only <arch1>,<arch2>,... ------------------- */
+                else if (pp_casecmp(directive, "arch_only") == 0) {
+
+                    if (arg >= line_end || *arg == ';') {
+                        fprintf(stderr,
+                                "[Precompiler] %s:%d: @arch_only requires "
+                                "at least one architecture name\n",
+                                filename, line_num);
+                        return -1;
+                    }
+
+                    /* Walk a comma-separated list of arch names */
+                    int found = 0;
+                    const char *cur = arg;
+                    while (cur < line_end && *cur != ';') {
+                        /* Skip leading whitespace */
+                        while (cur < line_end &&
+                               (*cur == ' ' || *cur == '\t')) cur++;
+                        if (cur >= line_end || *cur == ';') break;
+
+                        /* Extract one token (until comma, space, or end) */
+                        const char *tok_start = cur;
+                        while (cur < line_end &&
+                               *cur != ',' && *cur != ' ' &&
+                               *cur != '\t' && *cur != ';') cur++;
+                        int tok_len = (int)(cur - tok_start);
+
+                        if (tok_len > 0) {
+                            char arch_tok[64];
+                            if (tok_len >= 64) tok_len = 63;
+                            memcpy(arch_tok, tok_start, (size_t)tok_len);
+                            arch_tok[tok_len] = '\0';
+
+                            if (pp_casecmp(arch_tok, state->arch) == 0) {
+                                found = 1;
+                                break;
+                            }
+                        }
+
+                        /* Advance past comma */
+                        while (cur < line_end &&
+                               (*cur == ',' || *cur == ' ' ||
+                                *cur == '\t')) cur++;
+                    }
+
+                    if (!found) {
+                        /* Build the allowed list for the error message */
+                        char allowed[256];
+                        int  alen = 0;
+                        const char *ac = arg;
+                        while (ac < line_end && *ac != ';' &&
+                               alen < (int)sizeof(allowed) - 1) {
+                            allowed[alen++] = *ac++;
+                        }
+                        /* Trim trailing whitespace from allowed list */
+                        while (alen > 0 &&
+                               (allowed[alen-1] == ' '  ||
+                                allowed[alen-1] == '\t' ||
+                                allowed[alen-1] == '\r'))
+                            alen--;
+                        allowed[alen] = '\0';
+
+                        fprintf(stderr,
+                                "[Precompiler] %s:%d: @arch_only — "
+                                "current architecture '%s' is not in the "
+                                "supported set [%s]\n",
+                                filename, line_num, state->arch, allowed);
+                        return -1;
+                    }
+
+                    if (strbuf_append_char(output, '\n') != 0) return -1;
+                }
+                /* ---- @sys_only <sys1>,<sys2>,... ---------------------- */
+                else if (pp_casecmp(directive, "sys_only") == 0) {
+
+                    if (arg >= line_end || *arg == ';') {
+                        fprintf(stderr,
+                                "[Precompiler] %s:%d: @sys_only requires "
+                                "at least one system name\n",
+                                filename, line_num);
+                        return -1;
+                    }
+
+                    if (state->sys == NULL) {
+                        /* No -sys specified but file requires one */
+                        char allowed[256];
+                        int  alen = 0;
+                        const char *ac = arg;
+                        while (ac < line_end && *ac != ';' &&
+                               alen < (int)sizeof(allowed) - 1) {
+                            allowed[alen++] = *ac++;
+                        }
+                        while (alen > 0 &&
+                               (allowed[alen-1] == ' '  ||
+                                allowed[alen-1] == '\t' ||
+                                allowed[alen-1] == '\r'))
+                            alen--;
+                        allowed[alen] = '\0';
+
+                        fprintf(stderr,
+                                "[Precompiler] %s:%d: @sys_only — "
+                                "no -sys specified, but file requires "
+                                "one of [%s]\n",
+                                filename, line_num, allowed);
+                        return -1;
+                    }
+
+                    /* Walk a comma-separated list of system names */
+                    int found = 0;
+                    const char *cur = arg;
+                    while (cur < line_end && *cur != ';') {
+                        while (cur < line_end &&
+                               (*cur == ' ' || *cur == '\t')) cur++;
+                        if (cur >= line_end || *cur == ';') break;
+
+                        const char *tok_start = cur;
+                        while (cur < line_end &&
+                               *cur != ',' && *cur != ' ' &&
+                               *cur != '\t' && *cur != ';') cur++;
+                        int tok_len = (int)(cur - tok_start);
+
+                        if (tok_len > 0) {
+                            char sys_tok[64];
+                            if (tok_len >= 64) tok_len = 63;
+                            memcpy(sys_tok, tok_start, (size_t)tok_len);
+                            sys_tok[tok_len] = '\0';
+
+                            if (pp_casecmp(sys_tok, state->sys) == 0) {
+                                found = 1;
+                                break;
+                            }
+                        }
+
+                        while (cur < line_end &&
+                               (*cur == ',' || *cur == ' ' ||
+                                *cur == '\t')) cur++;
+                    }
+
+                    if (!found) {
+                        char allowed[256];
+                        int  alen = 0;
+                        const char *ac = arg;
+                        while (ac < line_end && *ac != ';' &&
+                               alen < (int)sizeof(allowed) - 1) {
+                            allowed[alen++] = *ac++;
+                        }
+                        while (alen > 0 &&
+                               (allowed[alen-1] == ' '  ||
+                                allowed[alen-1] == '\t' ||
+                                allowed[alen-1] == '\r'))
+                            alen--;
+                        allowed[alen] = '\0';
+
+                        fprintf(stderr,
+                                "[Precompiler] %s:%d: @sys_only — "
+                                "current system '%s' is not in the "
+                                "supported set [%s]\n",
+                                filename, line_num, state->sys, allowed);
+                        return -1;
+                    }
+
                     if (strbuf_append_char(output, '\n') != 0) return -1;
                 }
                 /* ---- @DUMMY [message] --------------------------------- */

@@ -47,6 +47,272 @@
 
 #define UA_VERSION "26.0.1-ALPHA"
 
+/* Forward declaration — used by compliance tables before full definition */
+static int str_casecmp_portable(const char *a, const char *b);
+
+/* =========================================================================
+ *  Opcode Compliance — Architecture / System validation tables
+ *
+ *  Each opcode carries two bitmasks:
+ *    arch_mask  —  which architectures support the instruction
+ *    sys_mask   —  which systems/OS targets support the instruction
+ *
+ *  If an instruction has  arch_mask == UA_AALL  and  sys_mask == UA_SALL,
+ *  it is universal and accepted everywhere.  When new architecture-specific
+ *  opcodes are added, restrict the masks accordingly.
+ *
+ *  The validation pass runs after parsing, before backend dispatch.
+ * ========================================================================= */
+
+/* Architecture bitmask flags */
+#define UA_AX86     0x01u   /* x86-64                  */
+#define UA_AX86_32  0x02u   /* x86-32 (IA-32)          */
+#define UA_AARM     0x04u   /* ARM (ARMv7-A)           */
+#define UA_AARM64   0x08u   /* ARM64 (AArch64)         */
+#define UA_ARISCV   0x10u   /* RISC-V (RV64I+M)        */
+#define UA_AMCS51   0x20u   /* 8051 / MCS-51           */
+#define UA_AALL     0x3Fu   /* All architectures       */
+
+/* System/OS bitmask flags */
+#define UA_SBARE    0x01u   /* baremetal (no OS)       */
+#define UA_SWIN32   0x02u   /* Windows (win32)         */
+#define UA_SLINUX   0x04u   /* Linux                   */
+#define UA_SMACOS   0x08u   /* macOS                   */
+#define UA_SALL     0x0Fu   /* All systems             */
+
+typedef struct {
+    unsigned int arch_mask;     /* supported architectures                   */
+    unsigned int sys_mask;      /* supported systems                         */
+} OpcodeCompliance;
+
+/*
+ * Compliance table — indexed by Opcode enum.
+ *
+ * All 37 existing opcodes are universal (UA_AALL, UA_SALL).
+ * When architecture-specific instructions are introduced, restrict the
+ * masks here.  The SYS opcode is restricted to non-baremetal systems
+ * on architectures that require an OS for syscall support.
+ *
+ * NOTE: OP_SYS uses native syscall instructions (SYSCALL, SVC, ECALL)
+ *       which are valid even on baremetal firmware (calling into firmware
+ *       supervisor mode), so it is kept universal.
+ */
+static const OpcodeCompliance OPCODE_COMPLIANCE[OP_COUNT] = {
+    /* Data movement                                                        */
+    [OP_MOV]    = { UA_AALL,  UA_SALL  },
+    [OP_LDI]    = { UA_AALL,  UA_SALL  },
+    [OP_LOAD]   = { UA_AALL,  UA_SALL  },
+    [OP_STORE]  = { UA_AALL,  UA_SALL  },
+
+    /* Arithmetic                                                           */
+    [OP_ADD]    = { UA_AALL,  UA_SALL  },
+    [OP_SUB]    = { UA_AALL,  UA_SALL  },
+    [OP_MUL]    = { UA_AALL,  UA_SALL  },
+    [OP_DIV]    = { UA_AALL,  UA_SALL  },
+
+    /* Bitwise                                                              */
+    [OP_AND]    = { UA_AALL,  UA_SALL  },
+    [OP_OR]     = { UA_AALL,  UA_SALL  },
+    [OP_XOR]    = { UA_AALL,  UA_SALL  },
+    [OP_NOT]    = { UA_AALL,  UA_SALL  },
+    [OP_SHL]    = { UA_AALL,  UA_SALL  },
+    [OP_SHR]    = { UA_AALL,  UA_SALL  },
+
+    /* Comparison / control flow                                            */
+    [OP_CMP]    = { UA_AALL,  UA_SALL  },
+    [OP_JMP]    = { UA_AALL,  UA_SALL  },
+    [OP_JZ]     = { UA_AALL,  UA_SALL  },
+    [OP_JNZ]    = { UA_AALL,  UA_SALL  },
+    [OP_JL]     = { UA_AALL,  UA_SALL  },
+    [OP_JG]     = { UA_AALL,  UA_SALL  },
+    [OP_CALL]   = { UA_AALL,  UA_SALL  },
+    [OP_RET]    = { UA_AALL,  UA_SALL  },
+
+    /* Stack                                                                */
+    [OP_PUSH]   = { UA_AALL,  UA_SALL  },
+    [OP_POP]    = { UA_AALL,  UA_SALL  },
+
+    /* Increment / Decrement                                                */
+    [OP_INC]    = { UA_AALL,  UA_SALL  },
+    [OP_DEC]    = { UA_AALL,  UA_SALL  },
+
+    /* Software Interrupt                                                   */
+    [OP_INT]    = { UA_AALL,  UA_SALL  },
+
+    /* Variables                                                            */
+    [OP_VAR]    = { UA_AALL,  UA_SALL  },
+    [OP_SET]    = { UA_AALL,  UA_SALL  },
+    [OP_GET]    = { UA_AALL,  UA_SALL  },
+
+    /* String / Byte / Syscall                                              */
+    [OP_LDS]    = { UA_AALL,  UA_SALL  },
+    [OP_LOADB]  = { UA_AALL,  UA_SALL  },
+    [OP_STOREB] = { UA_AALL,  UA_SALL  },
+    [OP_SYS]    = { UA_AALL,  UA_SALL  },
+
+    /* Buffer allocation                                                    */
+    [OP_BUFFER] = { UA_AALL,  UA_SALL  },
+
+    /* Miscellaneous                                                        */
+    [OP_NOP]    = { UA_AALL,  UA_SALL  },
+    [OP_HLT]    = { UA_AALL,  UA_SALL  },
+};
+
+/* -------------------------------------------------------------------------
+ *  resolve_arch_mask()  —  map an architecture string to its bitmask
+ * --------------------------------------------------------------------- */
+static unsigned int resolve_arch_mask(const char *arch)
+{
+    if (str_casecmp_portable(arch, "x86") == 0)        return UA_AX86;
+    if (str_casecmp_portable(arch, "x86_32") == 0 ||
+        str_casecmp_portable(arch, "ia32") == 0)       return UA_AX86_32;
+    if (str_casecmp_portable(arch, "arm") == 0)         return UA_AARM;
+    if (str_casecmp_portable(arch, "arm64") == 0 ||
+        str_casecmp_portable(arch, "aarch64") == 0)     return UA_AARM64;
+    if (str_casecmp_portable(arch, "riscv") == 0 ||
+        str_casecmp_portable(arch, "rv64") == 0)        return UA_ARISCV;
+    if (str_casecmp_portable(arch, "mcs51") == 0)       return UA_AMCS51;
+    return 0;
+}
+
+/* -------------------------------------------------------------------------
+ *  resolve_sys_mask()  —  map a system string to its bitmask
+ *  Returns UA_SBARE when sys is NULL (baremetal target).
+ * --------------------------------------------------------------------- */
+static unsigned int resolve_sys_mask(const char *sys)
+{
+    if (!sys)                                           return UA_SBARE;
+    if (str_casecmp_portable(sys, "baremetal") == 0)    return UA_SBARE;
+    if (str_casecmp_portable(sys, "win32") == 0)        return UA_SWIN32;
+    if (str_casecmp_portable(sys, "linux") == 0)        return UA_SLINUX;
+    if (str_casecmp_portable(sys, "macos") == 0 ||
+        str_casecmp_portable(sys, "darwin") == 0)       return UA_SMACOS;
+    return 0;
+}
+
+/* -------------------------------------------------------------------------
+ *  arch_name_from_mask()  —  human-readable list of supported archs
+ * --------------------------------------------------------------------- */
+static void arch_names_from_mask(unsigned int mask, char *buf, int size)
+{
+    buf[0] = '\0';
+    int pos = 0;
+    struct { unsigned int bit; const char *name; } map[] = {
+        { UA_AX86,    "x86"    },
+        { UA_AX86_32, "x86_32" },
+        { UA_AARM,    "arm"    },
+        { UA_AARM64,  "arm64"  },
+        { UA_ARISCV,  "riscv"  },
+        { UA_AMCS51,  "mcs51"  },
+    };
+    for (int i = 0; i < 6; i++) {
+        if (mask & map[i].bit) {
+            if (pos > 0 && pos < size - 2) {
+                buf[pos++] = ',';
+                buf[pos++] = ' ';
+            }
+            int nlen = (int)strlen(map[i].name);
+            if (pos + nlen < size - 1) {
+                memcpy(buf + pos, map[i].name, (size_t)nlen);
+                pos += nlen;
+            }
+        }
+    }
+    buf[pos] = '\0';
+}
+
+/* -------------------------------------------------------------------------
+ *  sys_names_from_mask()  —  human-readable list of supported systems
+ * --------------------------------------------------------------------- */
+static void sys_names_from_mask(unsigned int mask, char *buf, int size)
+{
+    buf[0] = '\0';
+    int pos = 0;
+    struct { unsigned int bit; const char *name; } map[] = {
+        { UA_SBARE,  "baremetal" },
+        { UA_SWIN32, "win32"     },
+        { UA_SLINUX, "linux"     },
+        { UA_SMACOS, "macos"     },
+    };
+    for (int i = 0; i < 4; i++) {
+        if (mask & map[i].bit) {
+            if (pos > 0 && pos < size - 2) {
+                buf[pos++] = ',';
+                buf[pos++] = ' ';
+            }
+            int nlen = (int)strlen(map[i].name);
+            if (pos + nlen < size - 1) {
+                memcpy(buf + pos, map[i].name, (size_t)nlen);
+                pos += nlen;
+            }
+        }
+    }
+    buf[pos] = '\0';
+}
+
+/* -------------------------------------------------------------------------
+ *  validate_opcode_compliance()
+ *
+ *  Walk every IR instruction and verify that its opcode is supported by
+ *  the target architecture and system.  Returns 0 on success, -1 on
+ *  failure (diagnostics printed to stderr).
+ * --------------------------------------------------------------------- */
+static int validate_opcode_compliance(const Instruction *ir, int ir_count,
+                                      const char *arch, const char *sys)
+{
+    unsigned int arch_bit = resolve_arch_mask(arch);
+    unsigned int sys_bit  = resolve_sys_mask(sys);
+    int errors = 0;
+
+    for (int i = 0; i < ir_count; i++) {
+        if (ir[i].is_label) continue;   /* labels have no opcode */
+
+        Opcode op = ir[i].opcode;
+        if (op < 0 || op >= OP_COUNT) continue;  /* safety guard */
+
+        const OpcodeCompliance *c = &OPCODE_COMPLIANCE[op];
+
+        /* Check architecture support */
+        if (arch_bit != 0 && !(c->arch_mask & arch_bit)) {
+            char supported[128];
+            arch_names_from_mask(c->arch_mask, supported,
+                                (int)sizeof(supported));
+            fprintf(stderr,
+                    "\n  UA Compliance Error\n"
+                    "  -------------------\n"
+                    "  Line %d: opcode '%s' is not supported on "
+                    "architecture '%s'\n"
+                    "  Supported architectures: %s\n\n",
+                    ir[i].line, opcode_name(op), arch, supported);
+            errors++;
+        }
+
+        /* Check system support */
+        if (sys_bit != 0 && !(c->sys_mask & sys_bit)) {
+            char supported[128];
+            sys_names_from_mask(c->sys_mask, supported,
+                               (int)sizeof(supported));
+            fprintf(stderr,
+                    "\n  UA Compliance Error\n"
+                    "  -------------------\n"
+                    "  Line %d: opcode '%s' is not supported on "
+                    "system '%s'\n"
+                    "  Supported systems: %s\n\n",
+                    ir[i].line, opcode_name(op),
+                    sys ? sys : "baremetal", supported);
+            errors++;
+        }
+    }
+
+    if (errors > 0) {
+        fprintf(stderr, "[Compliance] %d opcode violation(s) found.\n",
+                errors);
+        return -1;
+    }
+
+    return 0;
+}
+
 /* =========================================================================
  *  Platform-specific JIT headers
  * ========================================================================= */
@@ -454,6 +720,19 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
     fprintf(stderr, "[Parser] %d IR instructions\n", ir_count);
+
+    /* --- 4b. Opcode compliance validation ------------------------------ */
+    if (validate_opcode_compliance(ir, ir_count, cfg.arch, cfg.sys) != 0) {
+        fprintf(stderr, "Error: opcode compliance check failed.\n");
+        free_instructions(ir);
+        free(tokens);
+        free(preprocessed);
+        free(source);
+        return EXIT_FAILURE;
+    }
+    fprintf(stderr, "[Compliance] All opcodes valid for %s", cfg.arch);
+    if (cfg.sys) fprintf(stderr, " / %s", cfg.sys);
+    fprintf(stderr, "\n");
 
     /* --- 5. Backend (architecture-specific code generation) ------------- */
     int rc = EXIT_SUCCESS;

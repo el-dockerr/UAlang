@@ -64,6 +64,8 @@ Before lexing, the UA precompiler evaluates lines starting with `@`.  Directives
 | `@ENDIF` | Close the most recent `@IF_ARCH` or `@IF_SYS` block |
 | `@IMPORT <path>` | Include another `.ua` file (each file imported at most once) |
 | `@DUMMY [message]` | Emit a stub diagnostic to stderr; no code generated |
+| `@arch_only <a>,<b>,...` | Abort compilation unless `-arch` matches one of the listed architectures |
+| `@sys_only <s>,<t>,...` | Abort compilation unless `-sys` matches one of the listed systems |
 
 ### Conditional Compilation
 
@@ -118,6 +120,20 @@ The prefix is derived from the filename: `lib/math.ua` → `math`, `helpers.ua` 
 
 This prevents name collisions when importing multiple files and provides clear provenance for every symbol.
 
+### Architecture & System Guards
+
+`@arch_only` and `@sys_only` are hard constraints — if the current target does not match any entry in the comma-separated list, compilation is **immediately aborted** with an error.  This is ideal for library files that only make sense for specific platforms.
+
+```asm
+; This file only compiles for ARM-family targets
+@arch_only arm, arm64
+
+; This file only compiles for Linux or macOS
+@sys_only linux, macos
+```
+
+Unlike `@IF_ARCH`/`@IF_SYS` (which silently skip code), `@arch_only`/`@sys_only` **fail loudly** and stop the build.  Use `@IF_*` for conditional sections within a universal file; use `@arch_only`/`@sys_only` to restrict an entire file to specific targets.
+
 ### Stub Markers
 
 ```asm
@@ -126,6 +142,19 @@ This prevents name collisions when importing multiple files and provides clear p
 ```
 
 Prints a diagnostic to stderr during compilation.  No code is emitted.
+
+### Opcode Compliance
+
+After parsing, the compiler validates every instruction against a per-opcode compliance table that specifies which architectures and systems support each opcode.  If any instruction is not supported by the target, compilation fails with a clear diagnostic:
+
+```
+  UA Compliance Error
+  -------------------
+  Line 5: opcode 'SYS' is not supported on architecture 'mcs51'
+  Supported architectures: x86, x86_32, arm, arm64, riscv
+```
+
+All 37 built-in opcodes are currently universal (supported on all architectures and systems).  As architecture-specific instructions are added in future phases, the compliance table ensures safe, portable code — and `@IF_ARCH` / `@arch_only` provide the mechanism to write platform-specific alternatives.
 
 ---
 
