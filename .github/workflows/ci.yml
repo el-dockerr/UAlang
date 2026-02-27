@@ -36,13 +36,8 @@ jobs:
             binary:  ua
             archive: ua-linux-x86_64.tar.gz
 
-          - name:    macos-intel
-            os:      macos-13
-            binary:  ua
-            archive: ua-macos-intel.tar.gz
-
           - name:    macos-arm
-            os:      macos-latest
+            os:      macos-latest          # Apple Silicon (ARM64); Intel runners retired 2026
             binary:  ua
             archive: ua-macos-arm.tar.gz
 

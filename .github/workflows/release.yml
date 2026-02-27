@@ -45,13 +45,8 @@ jobs:
             binary:  ua
             archive: ua-linux-x86_64.tar.gz
 
-          - name:    macos-intel
-            os:      macos-13
-            binary:  ua
-            archive: ua-macos-intel.tar.gz
-
           - name:    macos-arm
-            os:      macos-latest
+            os:      macos-latest          # Apple Silicon (ARM64); Intel runners retired 2026
             binary:  ua
             archive: ua-macos-arm.tar.gz
 
@@ -229,7 +224,6 @@ jobs:
           | Platform | Archive |
           |----------|---------|
           | Linux x86-64 | \`ua-linux-x86_64.tar.gz\` |
-          | macOS Intel (x86-64) | \`ua-macos-intel.tar.gz\` |
           | macOS Apple Silicon (ARM64) | \`ua-macos-arm.tar.gz\` |
           | Windows x86-64 | \`ua-windows-x86_64.zip\` |
           | FreeBSD x86-64 | \`ua-freebsd-x86_64.tar.gz\` |
@@ -254,7 +248,6 @@ jobs:
           prerelease: ${{ contains(steps.version.outputs.tag, '-') }}
           files: |
             dist/ua-linux-x86_64.tar.gz
-            dist/ua-macos-intel.tar.gz
             dist/ua-macos-arm.tar.gz
             dist/ua-windows-x86_64.zip
             dist/ua-freebsd-x86_64.tar.gz
