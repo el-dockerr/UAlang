@@ -23,7 +23,8 @@ Welcome to **Unified Assembly (UA)** — a portable assembly language that lets 
 11. [Common Patterns](#common-patterns)
 12. [Architecture-Specific Code](#architecture-specific-code)
 13. [Standard Libraries and Cross-Platform I/O](#standard-libraries-and-cross-platform-io)
-14. [What to Read Next](#what-to-read-next)
+14. [Tutorial: Your First Interactive App (The UA Calculator)](#tutorial-your-first-interactive-app-the-ua-calculator)
+15. [What to Read Next](#what-to-read-next)
 
 ---
 
@@ -824,6 +825,266 @@ When writing your own syscalls (beyond what `std_io` provides), here's the regis
 | Arg 2 | R1 | ECX |
 | Arg 3 | R2 | EDX |
 | Return | R0 | EAX |
+
+---
+
+## Tutorial: Your First Interactive App (The UA Calculator)
+
+You've learned registers, instructions, control flow, I/O, and standard libraries. Now let's put it all together by building something real: **an interactive calculator** that reads two numbers and an operator from the keyboard, performs the math, and prints the result.
+
+This tutorial walks through [tests/calc.ua](../tests/calc.ua) line by line.
+
+### Why a Calculator?
+
+A calculator is the perfect first "real" program because it exercises every major UA concept:
+
+| Concept | How the Calculator Uses It |
+|---------|---------------------------|
+| `BUFFER` | Allocating memory to capture keyboard input |
+| `VAR` / `GET` / `SET` | Storing and retrieving the parsed numbers |
+| `CALL` | Invoking library functions (`std_io.print`, `std_io.read`, `std_string.parse_int`, `std_string.to_string`) |
+| `CMP` / `JZ` | Branching on the operator character |
+| `ADD` / `SUB` | The actual arithmetic |
+| `LOADB` / `STOREB` | Byte-level work inside `parse_int` and `to_string` |
+| `@IMPORT` | Pulling in standard libraries |
+| `@ARCH_ONLY` | Restricting to supported targets |
+
+### The ASCII Trap: Why You Need `parse_int` and `to_string`
+
+This is the single most important concept for beginners working close to the metal.
+
+When you type **`5`** on your keyboard and press Enter, the operating system does **not** hand your program the number 5. It hands you the byte **`0x35`** (decimal 53) — the ASCII code for the *character* '5'. A newline (`0x0A`) follows it.
+
+So the "number" `42` arrives as three bytes in your buffer:
+
+```
+Buffer:  [ 0x34 ] [ 0x32 ] [ 0x0A ]   ← raw bytes
+           '4'      '2'      '\n'
+```
+
+If you tried to `ADD` these bytes directly, you'd get `0x34 + 0x32 = 0x66` — which is the letter 'f'. Not helpful.
+
+**`std_string.parse_int`** fixes this. It walks each byte, subtracts 48 (the ASCII value of '0'), multiplies a running total by 10, and adds the digit:
+
+```
+'4' → 0x34 - 48 = 4      total = 0 * 10 + 4 = 4
+'2' → 0x32 - 48 = 2      total = 4 * 10 + 2 = 42
+'\n' → stop
+                          Result: 42  ✓
+```
+
+The reverse problem hits when you want to *print* a result. The number `123` is a single integer in a register — but the screen expects three separate ASCII characters ('1', '2', '3'). **`std_string.to_string`** extracts digits by dividing by 10, converts each to ASCII (add 48), and writes them to a buffer.
+
+### Walking Through `calc.ua`
+
+#### 1. Header and Imports
+
+```asm
+@ARCH_ONLY x86, x86_32, arm, arm64, riscv
+@IMPORT std_io
+@IMPORT std_string
+```
+
+`@ARCH_ONLY` locks the program to architectures that support console I/O (everything except the bare-metal 8051). The two `@IMPORT` lines pull in the I/O and string-conversion libraries.
+
+#### 2. Data Section
+
+```asm
+    BUFFER input_1, 32       ; keyboard buffer for first number
+    BUFFER input_2, 32       ; keyboard buffer for second number
+    BUFFER input_op, 8       ; keyboard buffer for operator (+, -)
+    BUFFER output_buf, 32    ; output buffer for result string
+
+    VAR num1                 ; parsed first operand
+    VAR num2                 ; parsed second operand
+    VAR result               ; computed result
+```
+
+**`BUFFER`** reserves raw byte arrays. When you call `std_io.read`, the OS writes the user's keystrokes into these buffers. 32 bytes is generous for a number — it accommodates up to 31 digits plus a null terminator.
+
+**`VAR`** creates named integer variables. After parsing a string into an integer, we `SET` the variable so we can `GET` it back later.
+
+> **Key difference:** `GET R0, input_1` gives you the *address* of the buffer (a pointer). `GET R0, num1` gives you the *value* stored in the variable.
+
+#### 3. Reading and Parsing a Number
+
+```asm
+    LDS  R0, "Enter first number: "
+    CALL std_io.print
+
+    GET  R0, input_1         ; R0 = address of input buffer
+    LDI  R1, 31              ; max bytes to read
+    CALL std_io.read         ; OS fills buffer with keystrokes
+
+    GET  R0, input_1         ; R0 = buffer address (for parse_int)
+    CALL std_string.parse_int
+    SET  num1, R0            ; save the integer
+```
+
+This three-step pattern — **prompt → read → parse** — repeats for each input. Notice we pass 31 (not 32) to `std_io.read`, leaving room for a null terminator.
+
+After `parse_int` returns, R0 holds a real integer that `ADD` and `SUB` can work with.
+
+#### 4. Operator Dispatch
+
+```asm
+    GET  R3, input_op        ; R3 = address of operator buffer
+    LOADB R0, R3             ; R0 = first byte (the operator character)
+
+    LDI  R1, 43              ; '+' = ASCII 43
+    CMP  R0, R1
+    JZ   do_add
+
+    LDI  R1, 45              ; '-' = ASCII 45
+    CMP  R0, R1
+    JZ   do_sub
+
+    LDS  R0, "Error: unknown operator\n"
+    CALL std_io.print
+    HLT
+```
+
+Here's where UA's clean branching shines. Compare this to raw x86 assembly:
+
+| UA (clear intent) | x86-64 (cryptic) |
+|---|---|
+| `CMP R0, R1` | `cmp al, 0x2B` |
+| `JZ do_add` | `je 0x004010A0` |
+
+In UA, you compare two named registers and jump to a human-readable label. No magic hex addresses, no implicit flag registers, no mental gymnastics. The **intent** is front and center: *"if the byte equals '+', go do addition."*
+
+The fall-through case (neither '+' nor '-') prints an error and halts — defensive programming even in assembly.
+
+#### 5. Performing the Math
+
+```asm
+do_add:
+    GET  R0, num1
+    GET  R1, num2
+    ADD  R0, R1              ; R0 = num1 + num2
+    SET  result, R0
+    JMP  show_result
+
+do_sub:
+    GET  R0, num1
+    GET  R1, num2
+    SUB  R0, R1              ; R0 = num1 - num2
+    SET  result, R0
+    JMP  show_result
+```
+
+Load both operands from variables, perform one arithmetic instruction, save the result. This is as clean as assembly gets.
+
+#### 6. Converting Back and Printing
+
+```asm
+show_result:
+    GET  R0, result          ; R0 = computed integer
+    GET  R1, output_buf      ; R1 = output buffer address
+    CALL std_string.to_string
+
+    LDS  R0, "Result: "
+    CALL std_io.print
+
+    GET  R0, output_buf
+    CALL std_io.print
+
+    LDS  R0, "\n"
+    CALL std_io.print
+
+    HLT
+```
+
+`to_string` converts the integer in R0 into ASCII characters, writing them into `output_buf`. Then we print a label, the result string, and a newline.
+
+### Inside `parse_int`: Digit-by-Digit Conversion
+
+For the curious, here's the core loop from `std_string.parse_int` with annotations:
+
+```asm
+parse_int:
+    MOV  R3, R0          ; R3 = string pointer
+    LDI  R0, 0           ; running total = 0
+    LDI  R6, 10          ; constant: multiplier (and newline sentinel!)
+    LDI  R7, 48          ; constant: ASCII '0'
+
+parse_int_loop:
+    LOADB R1, R3         ; load one byte from the string
+    CMP  R1, ...         ; if null, newline, or \r → stop
+    JZ   parse_int_done
+    SUB  R1, R7          ; convert ASCII to digit (e.g. '5' - 48 = 5)
+    MUL  R0, R6          ; total = total × 10
+    ADD  R0, R1          ; total = total + digit
+    INC  R3              ; next character
+    JMP  parse_int_loop
+```
+
+Notice the clever reuse of R6: the value 10 serves double duty as both the multiplication constant and the newline character check.
+
+### Inside `to_string`: Digits in Reverse
+
+The hardest part of `to_string` is that division extracts digits **backwards** — least significant first:
+
+```
+123 ÷ 10 = 12 remainder 3  → write '3'
+ 12 ÷ 10 =  1 remainder 2  → write '2'
+  1 ÷ 10 =  0 remainder 1  → write '1'
+```
+
+The buffer now contains `"321"`. A swap-based reversal loop fixes the order to `"123"` before null-terminating.
+
+Since UA has no `MOD` instruction, the remainder is computed manually:
+
+```asm
+    MOV  R0, R3          ; R0 = value
+    MOV  R2, R3          ; R2 = value (backup)
+    DIV  R0, R7          ; R0 = value / 10
+    PUSH R0              ; save quotient
+    MUL  R0, R7          ; R0 = quotient × 10
+    SUB  R2, R0          ; R2 = value - quotient×10 = remainder
+```
+
+This is the kind of low-level trick you learn working close to the metal — and it works identically on every architecture UA supports.
+
+### Compiling and Running
+
+**Linux (x86-64):**
+```bash
+./uas tests/calc.ua -arch x86 -sys linux -format elf -o calc
+chmod +x calc
+./calc
+```
+
+**Windows (x86-64):**
+```bash
+uas.exe tests/calc.ua -arch x86 -sys win32 -format pe -o calc.exe
+calc.exe
+```
+
+**ARM64 Linux (e.g. Raspberry Pi 4 with 64-bit OS):**
+```bash
+./uas tests/calc.ua -arch arm64 -sys linux -format elf -o calc
+chmod +x calc
+./calc
+```
+
+Sample session (identical on every platform):
+
+```
+Enter first number: 100
+Enter second number: 58
+Operator (+ or -): -
+Result: 42
+```
+
+### Exercises
+
+Try extending the calculator on your own:
+
+1. **Add multiplication:** Check for `'*'` (ASCII 42) and use `MUL R0, R1`.
+2. **Add division:** Check for `'/'` (ASCII 47) and use `DIV R0, R1`. What happens if the second number is 0?
+3. **Loop it:** Instead of `HLT` after printing, `JMP` back to `main` to let the user do multiple calculations.
+4. **Handle negatives on input:** Modify `parse_int` to check for a leading `'-'` (ASCII 45) and negate the result if found.
 
 ---
 
