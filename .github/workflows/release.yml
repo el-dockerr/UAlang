@@ -1,0 +1,261 @@
+# =============================================================================
+#  UA - Unified Assembler
+#  Release Workflow — Build all platforms, generate checksums, publish release
+#
+#  Triggered by: git tag push matching  v*.*.*
+#                Example: git tag v1.2.0 && git push origin v1.2.0
+#
+#  Release assets produced:
+#    ua-linux-x86_64.tar.gz          Linux  x86-64
+#    ua-macos-intel.tar.gz           macOS  Intel (x86-64)
+#    ua-macos-arm.tar.gz             macOS  Apple Silicon (ARM64)
+#    ua-windows-x86_64.zip           Windows x86-64  (MinGW-w64)
+#    ua-freebsd-x86_64.tar.gz        FreeBSD x86-64
+#    checksums.sha256                SHA-256 hashes for all archives
+#
+#  Each archive contains:
+#    ua  (or ua.exe)    — compiler binary
+#    lib/               — standard library .ua files
+# =============================================================================
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write          # Required to create GitHub releases
+
+jobs:
+  # ---------------------------------------------------------------------------
+  #  Matrix job — Linux, macOS Intel, macOS ARM, Windows
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build · ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+
+          - name:    linux-x86_64
+            os:      ubuntu-latest
+            binary:  ua
+            archive: ua-linux-x86_64.tar.gz
+
+          - name:    macos-intel
+            os:      macos-13
+            binary:  ua
+            archive: ua-macos-intel.tar.gz
+
+          - name:    macos-arm
+            os:      macos-latest
+            binary:  ua
+            archive: ua-macos-arm.tar.gz
+
+          - name:    windows-x86_64
+            os:      windows-latest
+            binary:  ua.exe
+            archive: ua-windows-x86_64.zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---- Windows: install MinGW-w64 GCC via MSYS2 ----------------------
+      - name: Set up MSYS2 (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update:  true
+          install: mingw-w64-x86_64-gcc
+
+      # ---- Build: Linux / macOS ------------------------------------------
+      - name: Build (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          gcc -std=c99 -Wall -Wextra -pedantic -o ua \
+            src/main.c      src/lexer.c        src/parser.c      \
+            src/codegen.c   src/precompiler.c                      \
+            src/backend_8051.c   src/backend_x86_64.c             \
+            src/backend_x86_32.c src/backend_arm.c                 \
+            src/backend_arm64.c  src/backend_risc_v.c              \
+            src/emitter_pe.c src/emitter_elf.c src/emitter_macho.c
+          ./ua --version
+
+      # ---- Build: Windows (MSYS2 / MinGW-w64) ----------------------------
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          gcc -std=c99 -Wall -Wextra -pedantic -o ua.exe \
+            src/main.c      src/lexer.c        src/parser.c      \
+            src/codegen.c   src/precompiler.c                      \
+            src/backend_8051.c   src/backend_x86_64.c             \
+            src/backend_x86_32.c src/backend_arm.c                 \
+            src/backend_arm64.c  src/backend_risc_v.c              \
+            src/emitter_pe.c src/emitter_elf.c src/emitter_macho.c
+          ./ua.exe --version
+
+      # ---- Smoke-test ----------------------------------------------------
+      - name: Smoke-test (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          printf 'LDI R0, 42\nHLT\n' > /tmp/smoke.ua
+          ./ua /tmp/smoke.ua -arch x86 -o /tmp/smoke.bin
+
+      - name: Smoke-test (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          printf 'LDI R0, 42\nHLT\n' > /tmp/smoke.ua
+          ./ua.exe /tmp/smoke.ua -arch x86 -o /tmp/smoke.bin
+
+      # ---- Package: tar.gz (Linux / macOS) -------------------------------
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: tar -czf ${{ matrix.archive }} ua lib/
+
+      # ---- Package: zip (Windows) ----------------------------------------
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path ua.exe, lib -DestinationPath ${{ matrix.archive }}
+
+      # ---- Upload artifact -----------------------------------------------
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name:              ${{ matrix.name }}
+          path:              ${{ matrix.archive }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  #  Separate job — FreeBSD (via QEMU VM on an Ubuntu host)
+  # ---------------------------------------------------------------------------
+  build-freebsd:
+    name: Build · freebsd-x86_64
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build & test on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: pkg install -y gcc
+          run: |
+            set -e
+            gcc -std=c99 -Wall -Wextra -pedantic -o ua \
+              src/main.c      src/lexer.c        src/parser.c      \
+              src/codegen.c   src/precompiler.c                      \
+              src/backend_8051.c   src/backend_x86_64.c             \
+              src/backend_x86_32.c src/backend_arm.c                 \
+              src/backend_arm64.c  src/backend_risc_v.c              \
+              src/emitter_pe.c src/emitter_elf.c src/emitter_macho.c
+            ./ua --version
+            printf 'LDI R0, 42\nHLT\n' > /tmp/smoke.ua
+            ./ua /tmp/smoke.ua -arch x86 -o /tmp/smoke.bin
+            tar -czf ua-freebsd-x86_64.tar.gz ua lib/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name:              freebsd-x86_64
+          path:              ua-freebsd-x86_64.tar.gz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  #  Release job — collect all artifacts, generate checksums, publish
+  #
+  #  Runs on Ubuntu (sha256sum is available by default).
+  #  Requires the `contents: write` permission declared at the top of the file.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish Release
+    needs: [build, build-freebsd]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (for release notes)
+        uses: actions/checkout@v4
+
+      # ---- Download every platform artifact into a staging directory -----
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-staging/
+
+      # ---- Flatten: each artifact lands in its own sub-directory --------
+      #  release-staging/
+      #    linux-x86_64/ua-linux-x86_64.tar.gz
+      #    windows-x86_64/ua-windows-x86_64.zip
+      #    ...
+      - name: Flatten artifacts into working directory
+        run: |
+          mkdir -p dist/
+          find release-staging/ -type f \( -name "*.tar.gz" -o -name "*.zip" \) \
+               -exec mv {} dist/ \;
+          ls -lh dist/
+
+      # ---- Generate SHA-256 checksums ------------------------------------
+      - name: Generate SHA-256 checksums
+        working-directory: dist/
+        run: |
+          sha256sum *.tar.gz *.zip > checksums.sha256
+          echo "--- Checksums ---"
+          cat checksums.sha256
+
+      # ---- Extract tag name for display in release title ----------------
+      - name: Set release version
+        id: version
+        run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      # ---- Build release notes from CHANGELOG if present, else auto -----
+      - name: Build release body
+        id: release_body
+        run: |
+          VERSION="${{ steps.version.outputs.tag }}"
+          cat > release_body.md <<EOF
+          ## UA — Unified Assembler ${VERSION}
+
+          ### Downloads
+
+          | Platform | Archive |
+          |----------|---------|
+          | Linux x86-64 | \`ua-linux-x86_64.tar.gz\` |
+          | macOS Intel (x86-64) | \`ua-macos-intel.tar.gz\` |
+          | macOS Apple Silicon (ARM64) | \`ua-macos-arm.tar.gz\` |
+          | Windows x86-64 | \`ua-windows-x86_64.zip\` |
+          | FreeBSD x86-64 | \`ua-freebsd-x86_64.tar.gz\` |
+
+          Each archive contains the \`ua\` binary and the \`lib/\` standard library directory.
+
+          ### Verify integrity
+          Download \`checksums.sha256\` and run:
+          \`\`\`
+          sha256sum --check checksums.sha256
+          \`\`\`
+          EOF
+
+      # ---- Create the GitHub release and upload all assets ---------------
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name:   ${{ steps.version.outputs.tag }}
+          name:       "UA Unified Assembler ${{ steps.version.outputs.tag }}"
+          body_path:  release_body.md
+          draft:      false
+          prerelease: ${{ contains(steps.version.outputs.tag, '-') }}
+          files: |
+            dist/ua-linux-x86_64.tar.gz
+            dist/ua-macos-intel.tar.gz
+            dist/ua-macos-arm.tar.gz
+            dist/ua-windows-x86_64.zip
+            dist/ua-freebsd-x86_64.tar.gz
+            dist/checksums.sha256

@@ -1,0 +1,164 @@
+# =============================================================================
+#  UA - Unified Assembler
+#  CI Workflow — Build & smoke-test on every push and pull request
+#
+#  Platforms:
+#    - Linux      (ubuntu-latest,  x86-64)
+#    - macOS      (macos-13,       Intel x86-64)
+#    - macOS      (macos-latest,   Apple Silicon ARM64)
+#    - Windows    (windows-latest, x86-64, MinGW-w64 toolchain)
+#    - FreeBSD    (ubuntu-latest host + vmactions/freebsd-vm, x86-64)
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"]          # Tags are handled by the release workflow
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  # ---------------------------------------------------------------------------
+  #  Matrix job — Linux, macOS Intel, macOS ARM, Windows
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build · ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+
+          - name:    linux-x86_64
+            os:      ubuntu-latest
+            binary:  ua
+            archive: ua-linux-x86_64.tar.gz
+
+          - name:    macos-intel
+            os:      macos-13
+            binary:  ua
+            archive: ua-macos-intel.tar.gz
+
+          - name:    macos-arm
+            os:      macos-latest
+            binary:  ua
+            archive: ua-macos-arm.tar.gz
+
+          - name:    windows-x86_64
+            os:      windows-latest
+            binary:  ua.exe
+            archive: ua-windows-x86_64.zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---- Windows: install MinGW-w64 GCC via MSYS2 ----------------------
+      - name: Set up MSYS2 (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update:  true
+          install: mingw-w64-x86_64-gcc
+
+      # ---- Build: Linux / macOS ------------------------------------------
+      - name: Build (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          gcc -std=c99 -Wall -Wextra -pedantic -o ua \
+            src/main.c      src/lexer.c        src/parser.c      \
+            src/codegen.c   src/precompiler.c                      \
+            src/backend_8051.c   src/backend_x86_64.c             \
+            src/backend_x86_32.c src/backend_arm.c                 \
+            src/backend_arm64.c  src/backend_risc_v.c              \
+            src/emitter_pe.c src/emitter_elf.c src/emitter_macho.c
+          ./ua --version
+
+      # ---- Build: Windows (MSYS2 / MinGW-w64) ----------------------------
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          gcc -std=c99 -Wall -Wextra -pedantic -o ua.exe \
+            src/main.c      src/lexer.c        src/parser.c      \
+            src/codegen.c   src/precompiler.c                      \
+            src/backend_8051.c   src/backend_x86_64.c             \
+            src/backend_x86_32.c src/backend_arm.c                 \
+            src/backend_arm64.c  src/backend_risc_v.c              \
+            src/emitter_pe.c src/emitter_elf.c src/emitter_macho.c
+          ./ua.exe --version
+
+      # ---- Smoke-test: compile a simple UA program -----------------------
+      - name: Smoke-test (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          echo 'LDI R0, 42' > /tmp/smoke.ua
+          echo 'HLT'       >> /tmp/smoke.ua
+          ./ua /tmp/smoke.ua -arch x86 -o /tmp/smoke.bin
+
+      - name: Smoke-test (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          printf 'LDI R0, 42\nHLT\n' > /tmp/smoke.ua
+          ./ua.exe /tmp/smoke.ua -arch x86 -o /tmp/smoke.bin
+
+      # ---- Package: tar.gz (Linux / macOS) -------------------------------
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: tar -czf ${{ matrix.archive }} ua lib/
+
+      # ---- Package: zip (Windows) ----------------------------------------
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path ua.exe, lib -DestinationPath ${{ matrix.archive }}
+
+      # ---- Upload artifact -----------------------------------------------
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name:              ${{ matrix.name }}
+          path:              ${{ matrix.archive }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  #  Separate job — FreeBSD (via QEMU VM on an Ubuntu host)
+  # ---------------------------------------------------------------------------
+  build-freebsd:
+    name: Build · freebsd-x86_64
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build & test on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: pkg install -y gcc
+          run: |
+            set -e
+            gcc -std=c99 -Wall -Wextra -pedantic -o ua \
+              src/main.c      src/lexer.c        src/parser.c      \
+              src/codegen.c   src/precompiler.c                      \
+              src/backend_8051.c   src/backend_x86_64.c             \
+              src/backend_x86_32.c src/backend_arm.c                 \
+              src/backend_arm64.c  src/backend_risc_v.c              \
+              src/emitter_pe.c src/emitter_elf.c src/emitter_macho.c
+            ./ua --version
+            # Smoke-test
+            printf 'LDI R0, 42\nHLT\n' > /tmp/smoke.ua
+            ./ua /tmp/smoke.ua -arch x86 -o /tmp/smoke.bin
+            tar -czf ua-freebsd-x86_64.tar.gz ua lib/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name:              freebsd-x86_64
+          path:              ua-freebsd-x86_64.tar.gz
+          if-no-files-found: error
