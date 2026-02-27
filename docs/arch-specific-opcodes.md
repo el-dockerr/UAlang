@@ -2,7 +2,7 @@
 
 These instructions extend UA beyond the portable MVIS core. Unlike MVIS opcodes (which work on every target), architecture-specific opcodes are restricted to particular CPU families. Using them on an unsupported target produces a **compile-time compliance error**.
 
-> **When to use these:** Architecture-specific opcodes let you tap into hardware features that have no portable equivalent — CPU identification, timestamp counters, memory barriers, low-power sleep modes, and bit-level I/O. Always guard them with `@IF_ARCH` or `@arch_only` to keep your program compilable across targets.
+> **When to use these:** Architecture-specific opcodes let you tap into hardware features that have no portable equivalent — CPU identification, timestamp counters, memory barriers, low-power sleep modes, and bit-level I/O. Always guard them with `@IF_ARCH` or `@ARCH_ONLY` to keep your program compilable across targets.
 
 ---
 
@@ -58,10 +58,10 @@ This prevents you from accidentally generating invalid machine code. To use arch
 @ENDIF
 ```
 
-Or restrict an entire file with `@arch_only`:
+Or restrict an entire file with `@ARCH_ONLY`:
 
 ```asm
-@arch_only mcs51
+@ARCH_ONLY mcs51
 ; This entire file is 8051-only
     DJNZ R0, loop
     RETI
@@ -743,7 +743,7 @@ main:
 ### 8051 Interrupt-Driven Firmware
 
 ```asm
-@arch_only mcs51
+@ARCH_ONLY mcs51
 
     JMP  main
 
@@ -773,7 +773,7 @@ idle:
 ### RISC-V Debugging
 
 ```asm
-@arch_only riscv
+@ARCH_ONLY riscv
 
     LDI  R0, 42
     EBREAK                   ; debugger stops here — inspect R0

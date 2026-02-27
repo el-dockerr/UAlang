@@ -91,8 +91,8 @@ The precompiler runs before the lexer and performs a text-to-text transformation
 | `@ENDIF` | Pop one conditional level |
 | `@IMPORT <path>` | Include another `.ua` file (at most once per unique path) |
 | `@DUMMY [message]` | Emit a stub diagnostic to stderr; no code generated |
-| `@arch_only <a>,<b>,...` | Abort compilation unless `-arch` matches one listed name |
-| `@sys_only <s>,<t>,...` | Abort compilation unless `-sys` matches one listed name |
+| `@ARCH_ONLY <a>,<b>,...` | Abort compilation unless `-arch` matches one listed name |
+| `@SYS_ONLY <s>,<t>,...` | Abort compilation unless `-sys` matches one listed name |
 
 ### Conditional Nesting
 
@@ -120,14 +120,14 @@ Directive lines and inactive (conditionally excluded) lines are replaced by blan
 
 ### Architecture & System Guards
 
-`@arch_only` and `@sys_only` are processed in active regions (they are not conditional-nesting directives).  When encountered:
+`@ARCH_ONLY` and `@SYS_ONLY` are processed in active regions (they are not conditional-nesting directives).  When encountered:
 
 1. Parse the comma-separated list of architecture/system names
 2. Compare each token (case-insensitive) against the current `-arch`/`-sys`
 3. If **none** match → print a diagnostic and return `-1` (fatal error)
 4. If a match is found → emit a blank line and continue normally
 
-For `@sys_only`, if no `-sys` flag was specified on the command line, the directive always fails with a dedicated error message.
+For `@SYS_ONLY`, if no `-sys` flag was specified on the command line, the directive always fails with a dedicated error message.
 
 ---
 

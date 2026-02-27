@@ -1,6 +1,6 @@
-; Test combined directives: @arch_only + @sys_only + @IF_ARCH
-@arch_only x86, x86_32, arm, arm64, riscv
-@sys_only  win32, linux
+; Test combined directives: @ARCH_ONLY + @SYS_ONLY + @IF_ARCH
+@ARCH_ONLY x86, x86_32, arm, arm64, riscv
+@SYS_ONLY  win32, linux
 
 ; Platform-specific code test
 @IF_ARCH x86

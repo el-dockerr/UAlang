@@ -13,8 +13,8 @@
  *    @ENDIF               Close an @IF_ARCH / @IF_SYS block
  *    @IMPORT  <path>      Include another .ua file (imported at most once)
  *    @DUMMY   [message]   Mark a stub; print diagnostic to stderr
- *    @arch_only <a>,<b>   Abort compilation unless -arch matches one entry
- *    @sys_only  <s>,<t>   Abort compilation unless -sys  matches one entry
+ *    @ARCH_ONLY <a>,<b>   Abort compilation unless -arch matches one entry
+ *    @SYS_ONLY  <s>,<t>   Abort compilation unless -sys  matches one entry
  *
  *  License: MIT
  * =============================================================================

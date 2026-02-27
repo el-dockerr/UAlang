@@ -14,8 +14,8 @@
  *  │  @ENDIF               Pop one conditional level                        │
  *  │  @IMPORT  <path>      Include file (skipped if already imported)       │
  *  │  @DUMMY   [message]   Emit a diagnostic stub marker to stderr          │
- *  │  @arch_only <a>,<b>   Abort unless -arch matches at least one entry    │
- *  │  @sys_only  <s>,<t>   Abort unless -sys  matches at least one entry    │
+ *  │  @ARCH_ONLY <a>,<b>   Abort unless -arch matches at least one entry    │
+ *  │  @SYS_ONLY  <s>,<t>   Abort unless -sys  matches at least one entry    │
  *  │                                                                        │
  *  │  Processing order:                                                     │
  *  │    1. Line-by-line scan of the source                                  │
@@ -841,12 +841,12 @@ static int pp_process(const char *source,
                     /* Blank line for the @IMPORT directive itself */
                     if (strbuf_append_char(output, '\n') != 0) return -1;
                 }
-                /* ---- @arch_only <arch1>,<arch2>,... ------------------- */
-                else if (pp_casecmp(directive, "arch_only") == 0) {
+                /* ---- @ARCH_ONLY <arch1>,<arch2>,... ------------------- */
+                else if (pp_casecmp(directive, "ARCH_ONLY") == 0) {
 
                     if (arg >= line_end || *arg == ';') {
                         fprintf(stderr,
-                                "[Precompiler] %s:%d: @arch_only requires "
+                                "[Precompiler] %s:%d: @ARCH_ONLY requires "
                                 "at least one architecture name\n",
                                 filename, line_num);
                         return -1;
@@ -904,7 +904,7 @@ static int pp_process(const char *source,
                         allowed[alen] = '\0';
 
                         fprintf(stderr,
-                                "[Precompiler] %s:%d: @arch_only — "
+                                "[Precompiler] %s:%d: @ARCH_ONLY — "
                                 "current architecture '%s' is not in the "
                                 "supported set [%s]\n",
                                 filename, line_num, state->arch, allowed);
@@ -913,12 +913,12 @@ static int pp_process(const char *source,
 
                     if (strbuf_append_char(output, '\n') != 0) return -1;
                 }
-                /* ---- @sys_only <sys1>,<sys2>,... ---------------------- */
-                else if (pp_casecmp(directive, "sys_only") == 0) {
+                /* ---- @SYS_ONLY <sys1>,<sys2>,... ---------------------- */
+                else if (pp_casecmp(directive, "SYS_ONLY") == 0) {
 
                     if (arg >= line_end || *arg == ';') {
                         fprintf(stderr,
-                                "[Precompiler] %s:%d: @sys_only requires "
+                                "[Precompiler] %s:%d: @SYS_ONLY requires "
                                 "at least one system name\n",
                                 filename, line_num);
                         return -1;
@@ -941,7 +941,7 @@ static int pp_process(const char *source,
                         allowed[alen] = '\0';
 
                         fprintf(stderr,
-                                "[Precompiler] %s:%d: @sys_only — "
+                                "[Precompiler] %s:%d: @SYS_ONLY — "
                                 "no -sys specified, but file requires "
                                 "one of [%s]\n",
                                 filename, line_num, allowed);
@@ -995,7 +995,7 @@ static int pp_process(const char *source,
                         allowed[alen] = '\0';
 
                         fprintf(stderr,
-                                "[Precompiler] %s:%d: @sys_only — "
+                                "[Precompiler] %s:%d: @SYS_ONLY — "
                                 "current system '%s' is not in the "
                                 "supported set [%s]\n",
                                 filename, line_num, state->sys, allowed);

@@ -427,16 +427,16 @@ UA's precompiler lets you write platform-specific code in a single file:
 @ENDIF
 ```
 
-### @arch_only / @sys_only — Hard Guards
+### @ARCH_ONLY / @SYS_ONLY — Hard Guards
 
 If your entire file is architecture-specific, use hard guards at the top:
 
 ```asm
-@arch_only x86, x86_32     ; abort compilation if target isn't x86 family
-@sys_only linux, win32      ; abort compilation if system isn't Linux or Windows
+@ARCH_ONLY x86, x86_32     ; abort compilation if target isn't x86 family
+@SYS_ONLY linux, win32      ; abort compilation if system isn't Linux or Windows
 ```
 
-Unlike `@IF_ARCH` (which silently skips code), `@arch_only` **stops compilation** with an error if the target doesn't match.
+Unlike `@IF_ARCH` (which silently skips code), `@ARCH_ONLY` **stops compilation** with an error if the target doesn't match.
 
 ---
 
