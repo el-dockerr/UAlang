@@ -5,16 +5,18 @@
  *
  *  File:    precompiler.h
  *  Purpose: Evaluate @-directives before lexing — conditional compilation,
- *           file imports, and stub markers.
+ *           file imports, macro definitions, and stub markers.
  *
  *  Directives:
  *    @IF_ARCH <arch>      Include block only when -arch matches
  *    @IF_SYS  <system>    Include block only when -sys matches
  *    @ENDIF               Close an @IF_ARCH / @IF_SYS block
  *    @IMPORT  <path>      Include another .ua file (imported at most once)
+ *    @DEFINE  <NAME> <V>  Define a text macro (token-boundary replacement)
  *    @DUMMY   [message]   Mark a stub; print diagnostic to stderr
  *    @ARCH_ONLY <a>,<b>   Abort compilation unless -arch matches one entry
  *    @SYS_ONLY  <s>,<t>   Abort compilation unless -sys  matches one entry
+ *    @ORG  <address>      Set origin address for subsequent code
  *
  *  License: MIT
  * =============================================================================

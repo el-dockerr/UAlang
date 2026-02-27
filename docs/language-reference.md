@@ -64,6 +64,7 @@ Before lexing, the UA precompiler evaluates lines starting with `@`.  Directives
 | `@ENDIF` | Close the most recent `@IF_ARCH` or `@IF_SYS` block |
 | `@IMPORT <path>` | Include another `.ua` file (each file imported at most once) |
 | `@DUMMY [message]` | Emit a stub diagnostic to stderr; no code generated |
+| `@DEFINE <NAME> <VALUE>` | Define a compile-time text macro — every occurrence of `NAME` in subsequent non-directive lines is replaced with `VALUE` |
 | `@ARCH_ONLY <a>,<b>,...` | Abort compilation unless `-arch` matches one of the listed architectures |
 | `@SYS_ONLY <s>,<t>,...` | Abort compilation unless `-sys` matches one of the listed systems |
 
@@ -133,6 +134,51 @@ This prevents name collisions when importing multiple files and provides clear p
 ```
 
 Unlike `@IF_ARCH`/`@IF_SYS` (which silently skip code), `@ARCH_ONLY`/`@SYS_ONLY` **fail loudly** and stop the build.  Use `@IF_*` for conditional sections within a universal file; use `@ARCH_ONLY`/`@SYS_ONLY` to restrict an entire file to specific targets.
+
+### Compile-Time Macros (`@DEFINE`)
+
+```asm
+@DEFINE SCON    0x98
+@DEFINE SBUF    0x99
+@DEFINE BAUD    0xFD
+```
+
+Defines a compile-time text substitution.  Every subsequent occurrence of `NAME` on non-directive lines is replaced with `VALUE` before the line reaches the lexer.  Replacement is **token-boundary-aware** — only whole identifiers matching `NAME` are substituted (partial matches inside other words are not affected).
+
+| Rule | Description |
+|------|-------------|
+| **Syntax** | `@DEFINE <NAME> <VALUE>` — name is an identifier; value is the rest of the line (trimmed) |
+| **Limit** | Up to 512 macros per compilation unit |
+| **Name length** | Maximum 63 characters |
+| **Value length** | Maximum 63 characters |
+| **Scope** | Global — a `@DEFINE` is visible to all lines processed after it, including code from subsequent `@IMPORT` files |
+| **No redefinition** | Defining the same name twice appends a second entry; the first match wins |
+| **Whole-token only** | `@DEFINE P0 0x80` replaces `P0` but not `DPH0` or `P0x` |
+
+**Typical use — hardware register definitions:**
+
+```asm
+@IMPORT hw_mcs51              ; imports @DEFINE P0 0x80, SCON 0x98, etc.
+
+    LDI  R0, 0x50
+    LDI  R1, SCON              ; expands to: LDI R1, 0x98
+    STORE R0, R1
+```
+
+Because macros are expanded *before* the lexer runs, the final token stream contains only literal numeric values — no runtime cost, no RAM overhead.
+
+### Hardware Definition Libraries
+
+UA ships with hardware definition libraries that use `@DEFINE` to expose register addresses for common platforms.  Import them with `@IMPORT` just like standard libraries:
+
+| Library | Target | Import |
+|---------|--------|--------|
+| `hw_mcs51` | Intel 8051 SFRs | `@IMPORT hw_mcs51` |
+| `hw_x86_pc` | x86 PC I/O ports | `@IMPORT hw_x86_pc` |
+| `hw_riscv_virt` | RISC-V QEMU virt MMIO | `@IMPORT hw_riscv_virt` |
+| `hw_arm_virt` | ARM/ARM64 QEMU virt MMIO | `@IMPORT hw_arm_virt` |
+
+Each library file begins with an `@ARCH_ONLY` guard that prevents accidental use on an incompatible target.
 
 ### Stub Markers
 

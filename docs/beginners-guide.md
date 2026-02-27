@@ -24,7 +24,8 @@ Welcome to **Unified Assembly (UA)** — a portable assembly language that lets 
 12. [Architecture-Specific Code](#architecture-specific-code)
 13. [Standard Libraries and Cross-Platform I/O](#standard-libraries-and-cross-platform-io)
 14. [Tutorial: Your First Interactive App (The UA Calculator)](#tutorial-your-first-interactive-app-the-ua-calculator)
-15. [What to Read Next](#what-to-read-next)
+15. [Using `@DEFINE` — Hardware Constants Without Runtime Cost](#using-define--hardware-constants-without-runtime-cost)
+16. [What to Read Next](#what-to-read-next)
 
 ---
 
@@ -1085,6 +1086,139 @@ Try extending the calculator on your own:
 2. **Add division:** Check for `'/'` (ASCII 47) and use `DIV R0, R1`. What happens if the second number is 0?
 3. **Loop it:** Instead of `HLT` after printing, `JMP` back to `main` to let the user do multiple calculations.
 4. **Handle negatives on input:** Modify `parse_int` to check for a leading `'-'` (ASCII 45) and negate the result if found.
+
+---
+
+## Using `@DEFINE` — Hardware Constants Without Runtime Cost
+
+When writing bare-metal or embedded programs, you deal with **hardware register addresses** — magic hex numbers like `0x98` or `0x89`.  Scattering these through your code makes it hard to read and easy to get wrong.  The `@DEFINE` directive solves this by giving names to constants *at compile time*.
+
+### What `@DEFINE` Does
+
+```asm
+@DEFINE LED_PORT  0x80
+@DEFINE DELAY     255
+```
+
+After these lines, every time the precompiler sees `LED_PORT` on a code line, it replaces it with `0x80` — before the lexer ever sees it.  The result is exactly as if you had typed `0x80` yourself.  **No variable, no RAM, no runtime overhead.**
+
+### Your First `@DEFINE` Program
+
+Create a file called `define_demo.ua`:
+
+```asm
+; define_demo.ua — @DEFINE basics
+@DEFINE ANSWER   42
+@DEFINE LIMIT    10
+
+    LDI  R0, 0          ; counter = 0
+
+loop:
+    INC  R0
+    CMP  R0, LIMIT      ; expands to: CMP R0, 10
+    JNZ  loop
+
+    LDI  R1, ANSWER      ; expands to: LDI R1, 42
+    HLT
+```
+
+Compile and run:
+
+```bash
+ua define_demo.ua -arch x86 --run
+```
+
+The precompiler replaces `LIMIT` → `10` and `ANSWER` → `42` before lexing.  The machine code is identical to writing the numbers directly — but your source is self-documenting.
+
+### Important Rules
+
+| Rule | What It Means |
+|------|---------------|
+| **Whole-token only** | `@DEFINE P0 0x80` replaces `P0` but **not** `DPH0` or `P0x` |
+| **One per line** | Each `@DEFINE` goes on its own line |
+| **Order matters** | A macro is only visible to lines *after* its `@DEFINE` |
+| **Max 512 macros** | More than enough for any hardware platform |
+| **No nesting** | `@DEFINE A B` then `@DEFINE B 5` — `A` expands to `B`, not to `5` |
+
+### Hardware Libraries: Pre-Built `@DEFINE` Collections
+
+Writing `@DEFINE` for every register by hand would be tedious.  UA ships with **hardware definition libraries** that do it for you:
+
+| Library | Import | What You Get |
+|---------|--------|--------------|
+| **hw_mcs51** | `@IMPORT hw_mcs51` | 8051 SFRs: `P0`, `SCON`, `SBUF`, `TMOD`, `TH1`, `IE`, etc. |
+| **hw_x86_pc** | `@IMPORT hw_x86_pc` | PC I/O ports: `PORT_COM1`, `PORT_VGA_CMD`, `PORT_KEYBOARD`, etc. |
+| **hw_riscv_virt** | `@IMPORT hw_riscv_virt` | QEMU virt: `UART0_BASE`, `CLINT_BASE`, `PLIC_BASE`, etc. |
+| **hw_arm_virt** | `@IMPORT hw_arm_virt` | QEMU virt: `PL011_BASE`, `GIC_DIST`, `GIC_CPU`, etc. |
+
+These libraries are guarded by `@ARCH_ONLY`, so they only compile for the correct target.
+
+### Example: 8051 UART Transmit
+
+Here's a real bare-metal program that configures the 8051 serial port and transmits the letter `'A'`.  Compare the macro version (left) with what the precompiler produces (right):
+
+**What you write:**
+
+```asm
+@IMPORT hw_mcs51
+
+    LDI  R0, 0x20
+    LDI  R1, TMOD          ; Timer 1, Mode 2
+    STORE R0, R1
+
+    LDI  R0, 0xFD
+    LDI  R1, TH1            ; 9600 baud
+    STORE R0, R1
+
+    LDI  R0, 0x50
+    LDI  R1, SCON           ; Serial Mode 1, REN
+    STORE R0, R1
+
+    LDI  R0, 0x41           ; 'A'
+    LDI  R1, SBUF           ; transmit!
+    STORE R0, R1
+    HLT
+```
+
+**What the precompiler produces** (after macro expansion):
+
+```asm
+    LDI  R0, 0x20
+    LDI  R1, 0x89           ; TMOD = 0x89
+    STORE R0, R1
+
+    LDI  R0, 0xFD
+    LDI  R1, 0x8D           ; TH1  = 0x8D
+    STORE R0, R1
+
+    LDI  R0, 0x50
+    LDI  R1, 0x98           ; SCON = 0x98
+    STORE R0, R1
+
+    LDI  R0, 0x41
+    LDI  R1, 0x99           ; SBUF = 0x99
+    STORE R0, R1
+    HLT
+```
+
+The human reads `SCON` and `SBUF`; the CPU sees `0x98` and `0x99`.  Best of both worlds.
+
+Compile the full demo:
+
+```bash
+ua examples/8051_uart_tx.ua -arch mcs51 -o uart_tx.bin
+```
+
+### When to Use `@DEFINE` vs. `VAR`
+
+| Feature | `@DEFINE` | `VAR` |
+|---------|-----------|-------|
+| **When it's resolved** | Compile time (precompiler) | Run time (CPU instructions) |
+| **RAM cost** | Zero | Uses memory for each variable |
+| **Can change at runtime** | No — it's a fixed substitution | Yes — `SET` / `GET` read/write freely |
+| **Best for** | Hardware addresses, magic numbers, configuration constants | Counters, accumulators, user data |
+
+**Rule of thumb:** If a value is known at compile time and never changes, use `@DEFINE`.  If it needs to change while the program runs, use `VAR`.
 
 ---
 

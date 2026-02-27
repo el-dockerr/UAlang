@@ -91,6 +91,7 @@ The precompiler runs before the lexer and performs a text-to-text transformation
 | `@ENDIF` | Pop one conditional level |
 | `@IMPORT <path>` | Include another `.ua` file (at most once per unique path) |
 | `@DUMMY [message]` | Emit a stub diagnostic to stderr; no code generated |
+| `@DEFINE <NAME> <VALUE>` | Define a compile-time text macro (token-boundary-aware replacement) |
 | `@ARCH_ONLY <a>,<b>,...` | Abort compilation unless `-arch` matches one listed name |
 | `@SYS_ONLY <s>,<t>,...` | Abort compilation unless `-sys` matches one listed name |
 
@@ -117,6 +118,16 @@ Import depth is limited to 16 levels to prevent circular references.
 ### Line Preservation
 
 Directive lines and inactive (conditionally excluded) lines are replaced by blank lines in the output.  This preserves line numbering so that subsequent lexer/parser error messages reference correct line numbers in the original source file.
+
+### Compile-Time Macros (`@DEFINE`)
+
+The precompiler maintains a macro table (up to 512 entries).  When `@DEFINE NAME VALUE` is encountered:
+
+1. `NAME` is extracted as an identifier (letters, digits, underscores)
+2. `VALUE` is the remainder of the line (whitespace-trimmed)
+3. Both are stored in the `PPMacroTable` inside `PPState`
+
+After all directives on a line have been evaluated, every non-directive line is scanned for macro replacement before being appended to the output.  The expansion function `pp_expand_macros()` walks the line character by character, identifies whole-token boundaries using `pp_is_ident_start()` / `pp_is_ident_char()`, and replaces matching tokens with their defined values.  This ensures that `@DEFINE P0 0x80` replaces the token `P0` but not a substring like `DPH0`.
 
 ### Architecture & System Guards
 

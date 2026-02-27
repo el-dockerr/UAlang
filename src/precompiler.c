@@ -16,6 +16,8 @@
  *  │  @DUMMY   [message]   Emit a diagnostic stub marker to stderr          │
  *  │  @ARCH_ONLY <a>,<b>   Abort unless -arch matches at least one entry    │
  *  │  @SYS_ONLY  <s>,<t>   Abort unless -sys  matches at least one entry    │
+ *  │  @DEFINE <NAME> <VAL> Define a text macro for token replacement        │
+ *  │  @ORG <address>       Set origin address for subsequent code           │
  *  │                                                                        │
  *  │  Processing order:                                                     │
  *  │    1. Line-by-line scan of the source                                  │
@@ -43,6 +45,9 @@
 #define PP_MAX_PATH_LEN       1024  /* Max file path length                  */
 #define PP_MAX_DIRECTIVE_LEN  32    /* Max directive keyword length           */
 #define PP_INITIAL_BUF_CAP    4096  /* Initial output-buffer capacity        */
+#define PP_MAX_DEFINES        512   /* Max @DEFINE macro entries             */
+#define PP_MAX_DEFINE_NAME    64    /* Max macro name length                 */
+#define PP_MAX_DEFINE_VALUE   64    /* Max macro value length                */
 
 /* =========================================================================
  *  Dynamic string buffer
@@ -233,6 +238,103 @@ static char* pp_read_file(const char *path)
 }
 
 /* =========================================================================
+ *  Macro definition table  (@DEFINE name value)
+ *
+ *  Shared across the PPState so that macros defined in imported files
+ *  are visible to the importer.
+ * ========================================================================= */
+typedef struct {
+    char name[PP_MAX_DEFINE_NAME];
+    char value[PP_MAX_DEFINE_VALUE];
+} PPMacro;
+
+typedef struct {
+    PPMacro entries[PP_MAX_DEFINES];
+    int     count;
+} PPMacroTable;
+
+/* Forward declarations (defined later, needed by pp_expand_macros) */
+static int pp_is_ident_char(char c);
+static int pp_is_ident_start(char c);
+
+static void pp_macro_init(PPMacroTable *mt) { mt->count = 0; }
+
+static int pp_macro_add(PPMacroTable *mt, const char *name, int nlen,
+                        const char *value, int vlen,
+                        const char *filename, int line_num)
+{
+    if (mt->count >= PP_MAX_DEFINES) {
+        fprintf(stderr,
+                "[Precompiler] %s:%d: @DEFINE limit exceeded (max %d)\n",
+                filename, line_num, PP_MAX_DEFINES);
+        return -1;
+    }
+    if (nlen >= PP_MAX_DEFINE_NAME) nlen = PP_MAX_DEFINE_NAME - 1;
+    if (vlen >= PP_MAX_DEFINE_VALUE) vlen = PP_MAX_DEFINE_VALUE - 1;
+    memcpy(mt->entries[mt->count].name,  name,  (size_t)nlen);
+    mt->entries[mt->count].name[nlen]   = '\0';
+    memcpy(mt->entries[mt->count].value, value, (size_t)vlen);
+    mt->entries[mt->count].value[vlen]  = '\0';
+    mt->count++;
+    return 0;
+}
+
+/* Perform token-boundary-aware macro expansion on a single line.
+ * Writes the expanded line into *out*.  Returns 0 on success, -1 on OOM.
+ *
+ * A macro NAME is replaced only when it appears as a whole token:
+ *   - preceded by start-of-string or a non-identifier character
+ *   - followed by end-of-string or a non-identifier character
+ * This prevents replacing partial words (e.g., "TMOD_VAL" when "TMOD" is defined).
+ */
+static int pp_expand_macros(const PPMacroTable *mt,
+                            const char *line, int line_len,
+                            StrBuf *out)
+{
+    if (mt->count == 0) {
+        /* Fast path: no macros defined */
+        return strbuf_append(out, line, line_len);
+    }
+
+    const char *p   = line;
+    const char *end = line + line_len;
+
+    while (p < end) {
+        /* If current character can start an identifier, try matching macros */
+        if (pp_is_ident_start(*p)) {
+            const char *id_start = p;
+            while (p < end && pp_is_ident_char(*p)) p++;
+            int id_len = (int)(p - id_start);
+
+            /* Search macro table for a match */
+            int replaced = 0;
+            for (int m = 0; m < mt->count; m++) {
+                int nlen = (int)strlen(mt->entries[m].name);
+                if (nlen == id_len &&
+                    memcmp(mt->entries[m].name, id_start, (size_t)id_len) == 0) {
+                    /* Match — emit the replacement value */
+                    int vlen = (int)strlen(mt->entries[m].value);
+                    if (strbuf_append(out, mt->entries[m].value, vlen) != 0)
+                        return -1;
+                    replaced = 1;
+                    break;
+                }
+            }
+            if (!replaced) {
+                /* No match — emit the original identifier */
+                if (strbuf_append(out, id_start, id_len) != 0)
+                    return -1;
+            }
+        } else {
+            /* Non-identifier character — emit as-is */
+            if (strbuf_append_char(out, *p) != 0) return -1;
+            p++;
+        }
+    }
+    return 0;
+}
+
+/* =========================================================================
  *  Import de-duplication state  (shared across recursive calls)
  * ========================================================================= */
 typedef struct {
@@ -241,6 +343,7 @@ typedef struct {
     const char *exe_dir;                        /* compiler executable dir  */
     char       *imported[PP_MAX_IMPORTS];       /* normalised import paths  */
     int         import_count;
+    PPMacroTable macros;                        /* @DEFINE table            */
 } PPState;
 
 static void pp_state_init(PPState *st, const char *arch, const char *sys,
@@ -250,6 +353,7 @@ static void pp_state_init(PPState *st, const char *arch, const char *sys,
     st->sys          = sys;
     st->exe_dir      = exe_dir;
     st->import_count = 0;
+    pp_macro_init(&st->macros);
 }
 
 static void pp_state_free(PPState *st)
@@ -694,17 +798,20 @@ static int pp_process(const char *source,
                         return -1;
                     }
 
-                    /* ---- std_* library resolution ---------------------
-                     * If the import name starts with "std_" and has no
-                     * path separator, resolve it as a standard library
-                     * from <exe_dir>/lib/<name>.ua                        */
+                    /* ---- std_* / hw_* library resolution -----
+                     * If the import name starts with "std_" or "hw_"
+                     * and has no path separator, resolve it as a
+                     * standard library from <exe_dir>/lib/<name>.ua  */
                     int is_std_lib = 0;
                     char std_path[PP_MAX_PATH_LEN];
-                    if (plen >= 4 &&
-                        import_path[0] == 's' &&
-                        import_path[1] == 't' &&
-                        import_path[2] == 'd' &&
-                        import_path[3] == '_') {
+                    if (plen >= 3 &&
+                        ((import_path[0] == 's' &&
+                          import_path[1] == 't' &&
+                          import_path[2] == 'd' &&
+                          import_path[3] == '_') ||
+                         (import_path[0] == 'h' &&
+                          import_path[1] == 'w' &&
+                          import_path[2] == '_'))) {
                         /* Check no path separators in name */
                         int has_sep = 0;
                         for (int ci = 0; ci < plen; ci++) {
@@ -1004,6 +1111,56 @@ static int pp_process(const char *source,
 
                     if (strbuf_append_char(output, '\n') != 0) return -1;
                 }
+                /* ---- @DEFINE <NAME> <VALUE> --------------------------- */
+                else if (pp_casecmp(directive, "DEFINE") == 0) {
+
+                    /* Parse: NAME (identifier) */
+                    const char *name_start = arg;
+                    while (name_start < line_end &&
+                           (*name_start == ' ' || *name_start == '\t'))
+                        name_start++;
+                    if (name_start >= line_end ||
+                        !pp_is_ident_start(*name_start)) {
+                        fprintf(stderr,
+                                "[Precompiler] %s:%d: @DEFINE requires "
+                                "a name\n", filename, line_num);
+                        return -1;
+                    }
+                    const char *name_end = name_start;
+                    while (name_end < line_end &&
+                           pp_is_ident_char(*name_end))
+                        name_end++;
+                    int nlen = (int)(name_end - name_start);
+
+                    /* Parse: VALUE (rest of line, trimmed) */
+                    const char *val_start = name_end;
+                    while (val_start < line_end &&
+                           (*val_start == ' ' || *val_start == '\t'))
+                        val_start++;
+                    const char *val_end = line_end;
+                    /* Trim trailing whitespace & comments */
+                    while (val_end > val_start &&
+                           (*(val_end - 1) == ' '  ||
+                            *(val_end - 1) == '\t' ||
+                            *(val_end - 1) == '\r'))
+                        val_end--;
+                    int vlen = (int)(val_end - val_start);
+                    if (vlen <= 0) {
+                        fprintf(stderr,
+                                "[Precompiler] %s:%d: @DEFINE requires "
+                                "a value\n", filename, line_num);
+                        return -1;
+                    }
+
+                    if (pp_macro_add(&state->macros,
+                                     name_start, nlen,
+                                     val_start, vlen,
+                                     filename, line_num) != 0)
+                        return -1;
+
+                    /* No code emitted — just a blank line */
+                    if (strbuf_append_char(output, '\n') != 0) return -1;
+                }
                 /* ---- @DUMMY [message] --------------------------------- */
                 else if (pp_casecmp(directive, "DUMMY") == 0) {
 
@@ -1077,9 +1234,16 @@ static int pp_process(const char *source,
          *  Regular (non-directive) line
          * ============================================================== */
         else if (is_active) {
-            /* Emit verbatim */
-            if (strbuf_append(output, line_start, line_len) != 0) return -1;
-            if (strbuf_append_char(output, '\n')            != 0) return -1;
+            /* Expand @DEFINE macros, then emit */
+            if (state->macros.count > 0) {
+                if (pp_expand_macros(&state->macros,
+                                     line_start, line_len, output) != 0)
+                    return -1;
+            } else {
+                if (strbuf_append(output, line_start, line_len) != 0)
+                    return -1;
+            }
+            if (strbuf_append_char(output, '\n') != 0) return -1;
         }
         else {
             /* Inactive — blank line placeholder */

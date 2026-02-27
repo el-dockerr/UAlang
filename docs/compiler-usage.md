@@ -211,6 +211,34 @@ Output during compilation:
 [Precompiler] DUMMY program.ua:13: (no implementation)
 ```
 
+### `@DEFINE <NAME> <VALUE>`
+
+Define a compile-time text macro.  Every subsequent occurrence of `NAME` on non-directive lines is replaced with `VALUE` before the line reaches the lexer.  Replacement is token-boundary-aware — only whole identifiers are matched.
+
+```asm
+@DEFINE LED_PORT  0x80
+@DEFINE BAUD_VAL  0xFD
+
+    LDI  R0, 0x50
+    LDI  R1, LED_PORT        ; expands to: LDI R1, 0x80
+    STORE R0, R1
+```
+
+| Constraint | Limit |
+|------------|-------|
+| Max macros | 512 |
+| Max name length | 63 characters |
+| Max value length | 63 characters |
+
+Macros are typically defined inside hardware definition libraries (`lib/hw_*.ua`) and imported via `@IMPORT`:
+
+```asm
+@IMPORT hw_mcs51             ; gives you SCON, SBUF, TMOD, TH1, ...
+@IMPORT hw_x86_pc            ; gives you PORT_COM1, PORT_VGA_CMD, ...
+@IMPORT hw_riscv_virt         ; gives you UART0_BASE, CLINT_BASE, ...
+@IMPORT hw_arm_virt           ; gives you PL011_BASE, GIC_DIST, ...
+```
+
 ### `@ARCH_ONLY <arch1>, <arch2>, ...`
 
 Abort compilation unless the current `-arch` matches **at least one** of the comma-separated architecture names (case-insensitive).  This is a hard guard — compilation stops immediately with an error if the target is not in the list.
