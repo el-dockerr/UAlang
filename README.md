@@ -2,7 +2,7 @@
 <div align="center">
   <img src="docs/images/icon128.png" alt="UA Logo" width="128"/>
 
-# UA — Unified Assembler
+# uα -  Unified Assembler
 **One assembly language. Every architecture.**
 <br>
 Version 26 - Codename "Awesome Ada"
@@ -11,7 +11,7 @@ Version 26 - Codename "Awesome Ada"
 > *This Version is named after *Ada Lovelace* (1815–1852): Considered as the first computer programmer. She wrote the first algorithm for Charles Babbage's Analytical Engine.*
 
 
-UA is an experimental assembler that defines a single, portable assembly language — the **Unified Assembly** instruction set — and compiles it to native machine code for multiple target architectures from a single source file.
+Uα [yu;ah] is an experimental assembler that defines a single, portable assembly language — the **Unified Assembly** instruction set — and compiles it to native machine code for multiple target architectures from a single source file.
 
 ## The UA Design Manifesto: The Philosophy of Unified Assembler
 1. **Bare Metal, Modern Comfort**
