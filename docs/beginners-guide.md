@@ -25,7 +25,9 @@ Welcome to **Unified Assembly (UA)** — a portable assembly language that lets 
 13. [Standard Libraries and Cross-Platform I/O](#standard-libraries-and-cross-platform-io)
 14. [Tutorial: Your First Interactive App (The UA Calculator)](#tutorial-your-first-interactive-app-the-ua-calculator)
 15. [Using `@DEFINE` — Hardware Constants Without Runtime Cost](#using-define--hardware-constants-without-runtime-cost)
-16. [What to Read Next](#what-to-read-next)
+16. [Working with Arrays (`std_array`)](#working-with-arrays-std_array)
+17. [Working with Vectors (`std_vector`)](#working-with-vectors-std_vector)
+18. [What to Read Next](#what-to-read-next)
 
 ---
 
@@ -1219,6 +1221,178 @@ ua examples/8051_uart_tx.ua -arch mcs51 -o uart_tx.bin
 | **Best for** | Hardware addresses, magic numbers, configuration constants | Counters, accumulators, user data |
 
 **Rule of thumb:** If a value is known at compile time and never changes, use `@DEFINE`.  If it needs to change while the program runs, use `VAR`.
+
+---
+
+## Working with Arrays (`std_array`)
+
+The `std_array` library gives you a **fixed-size byte array** — similar to C++ `std::array<uint8_t, N>`.  You allocate a `BUFFER`, tell the library where it lives and how big it is, then call functions like `fill`, `front`, `back`, `at`, and `set_at`.
+
+### Quick reference
+
+| Function   | Input variables            | Output (R0)             | Description                              |
+|-----------|----------------------------|------------------------|------------------------------------------|
+| `front`    | `ptr`, `size`              | First byte              | Like `arr[0]`                            |
+| `back`     | `ptr`, `size`              | Last byte               | Like `arr[size-1]`                       |
+| `data`     | `ptr`                      | Buffer address           | Like `arr.data()`                        |
+| `begin`    | `ptr`                      | Buffer address           | Like `arr.begin()`                       |
+| `end`      | `ptr`, `size`              | `ptr + size`            | Like `arr.end()`                         |
+| `empty`    | `size`                     | 1 if empty, else 0      | Like `arr.empty()`                       |
+| `size_of`  | `size`                     | Element count            | Like `arr.size()`                        |
+| `at`       | `ptr`, `index`             | Byte at index            | Like `arr[i]` / `arr.at(i)`             |
+| `set_at`   | `ptr`, `index`, `value`    | _(none)_                | Like `arr[i] = v`                        |
+| `fill`     | `ptr`, `size`, `value`     | _(none)_                | Like `arr.fill(v)`                       |
+
+### Example: Fill and read back
+
+```asm
+@IMPORT std_array
+
+BUFFER my_arr, 8
+
+JMP main
+
+main:
+    ; --- Setup: point std_array at our buffer ---
+    GET  R0, my_arr
+    SET  std_array.ptr, R0
+    SET  std_array.size, 8
+
+    ; --- Fill every slot with 0x42 ---
+    SET  std_array.value, 0x42
+    CALL std_array.fill
+
+    ; --- Read the first element ---
+    CALL std_array.front         ; R0 = 0x42
+
+    ; --- Overwrite index 3 with 0xFF ---
+    SET  std_array.index, 3
+    SET  std_array.value, 0xFF
+    CALL std_array.set_at
+
+    ; --- Read it back ---
+    SET  std_array.index, 3
+    CALL std_array.at            ; R0 = 0xFF
+
+    ; --- Check size and empty ---
+    CALL std_array.size_of       ; R0 = 8
+    CALL std_array.empty         ; R0 = 0 (not empty)
+
+    HLT
+```
+
+**Save as `array_demo.ua` and run:**
+
+```bash
+uas array_demo.ua -arch x86 --run        # JIT on x86-64
+uas array_demo.ua -arch arm   -o out.bin  # Cross-compile for ARM
+uas array_demo.ua -arch mcs51 -o out.bin  # Cross-compile for 8051
+```
+
+> **Why does this work on every architecture?**  
+> The `std_array` library uses only MVIS instructions (`LOADB`, `STOREB`, `ADD`, `CMP`, etc.). MVIS is the portable subset supported by all six backends.
+
+### How it works under the hood
+
+The library doesn't allocate memory itself — **you** provide a `BUFFER` and pass its address via the `ptr` variable. This keeps the library purely computational with zero hidden state, making it safe and predictable on bare-metal targets like the 8051.
+
+---
+
+## Working with Vectors (`std_vector`)
+
+The `std_vector` library is a **dynamic-size byte vector** — similar to C++ `std::vector<uint8_t>`.  Unlike `std_array`, the vector tracks a logical *size* that can grow from 0 up to a maximum *capacity*.  You still pre-allocate a `BUFFER` as backing storage, then use `push_back`, `pop_back`, and `resize` to manage elements.
+
+### Quick reference
+
+| Function      | Input variables                  | Output (R0)             | Description                              |
+|--------------|----------------------------------|------------------------|------------------------------------------|
+| `clear`       | _(none)_                        | _(none)_               | Reset to empty (`size = 0`)              |
+| `push_back`   | `value`                         | _(none)_               | Append byte (ignored if full)            |
+| `pop_back`    | _(none)_                        | Removed byte (0 if empty) | Remove & return last element          |
+| `front`       | `ptr`                           | First byte              | Like `vec[0]`                            |
+| `back`        | `ptr`, `vec_size`               | Last byte               | Like `vec[size-1]`                       |
+| `data`        | `ptr`                           | Buffer address           | Like `vec.data()`                        |
+| `begin`       | `ptr`                           | Buffer address           | Like `vec.begin()`                       |
+| `end`         | `ptr`, `vec_size`               | `ptr + vec_size`        | Like `vec.end()`                         |
+| `empty`       | `vec_size`                      | 1 if empty, else 0      | Like `vec.empty()`                       |
+| `size_of`     | `vec_size`                      | Current element count    | Like `vec.size()`                        |
+| `capacity_of` | `capacity`                      | Max capacity             | Like `vec.capacity()`                    |
+| `at`          | `ptr`, `index`                  | Byte at index            | Like `vec[i]`                            |
+| `set_at`      | `ptr`, `index`, `value`         | _(none)_                | Like `vec[i] = v`                        |
+| `resize`      | `new_size`                      | _(none)_                | Grow (zero-fill) or shrink               |
+
+### Example: Stack-like push/pop usage
+
+```asm
+@IMPORT std_vector
+
+BUFFER my_vec, 64
+
+JMP main
+
+main:
+    ; --- Setup: point std_vector at our buffer ---
+    GET  R0, my_vec
+    SET  std_vector.ptr, R0
+    SET  std_vector.capacity, 64
+    CALL std_vector.clear            ; start empty
+
+    ; --- Push three values ---
+    SET  std_vector.value, 10
+    CALL std_vector.push_back        ; vec = [10]
+    SET  std_vector.value, 20
+    CALL std_vector.push_back        ; vec = [10, 20]
+    SET  std_vector.value, 30
+    CALL std_vector.push_back        ; vec = [10, 20, 30]
+
+    ; --- Check size and front/back ---
+    CALL std_vector.size_of          ; R0 = 3
+    CALL std_vector.front            ; R0 = 10
+    CALL std_vector.back             ; R0 = 30
+
+    ; --- Pop the last element ---
+    CALL std_vector.pop_back         ; R0 = 30, vec = [10, 20]
+
+    ; --- Resize to grow (zero-fills new slots) ---
+    SET  std_vector.new_size, 5
+    CALL std_vector.resize           ; vec = [10, 20, 0, 0, 0]
+
+    ; --- Read the zero-filled element ---
+    SET  std_vector.index, 3
+    CALL std_vector.at               ; R0 = 0
+
+    ; --- Shrink back ---
+    SET  std_vector.new_size, 1
+    CALL std_vector.resize           ; vec = [10]
+
+    CALL std_vector.front            ; R0 = 10
+
+    HLT
+```
+
+**Save as `vector_demo.ua` and run:**
+
+```bash
+uas vector_demo.ua -arch x86 --run        # JIT on x86-64
+uas vector_demo.ua -arch riscv -o out.bin  # Cross-compile for RISC-V
+uas vector_demo.ua -arch mcs51 -o out.bin  # Cross-compile for 8051
+```
+
+### Key differences from `std_array`
+
+| | `std_array` | `std_vector` |
+|---|---|---|
+| **Size** | Fixed (you set `size` once) | Dynamic (`push_back` / `pop_back` / `resize`) |
+| **Tracked state** | None (stateless library) | `vec_size` is managed internally |
+| **Initialization** | Just set `ptr` and `size` | Must call `clear` after setting `ptr` and `capacity` |
+| **Growth** | N/A — size never changes | `push_back` appends; silently ignored if at capacity |
+| **Shrink** | N/A | `pop_back` removes last; `resize` truncates |
+
+### Safety notes
+
+- **No bounds checking:** `at` and `set_at` do not validate the index. Accessing out-of-range indices causes undefined behavior — just like C arrays.
+- **Capacity is a hard limit:** `push_back` silently does nothing when `vec_size == capacity`. The vector never reallocates (there is no heap).
+- **`pop_back` on empty:** Returns `0` instead of crashing. Check `empty` first if you need to distinguish zero from an actual element.
 
 ---
 

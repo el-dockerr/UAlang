@@ -533,6 +533,25 @@ static void ns_collect_labels(const char *text, NSLabelTable *tbl)
                     int var_len = (int)(s - var_start);
                     ns_add_label(tbl, var_start, var_len);
                 }
+            }
+            /* Check for BUFFER declaration: "BUFFER name" -> collect name */
+            if (id_len == 6 &&
+                (id_start[0] == 'B' || id_start[0] == 'b') &&
+                (id_start[1] == 'U' || id_start[1] == 'u') &&
+                (id_start[2] == 'F' || id_start[2] == 'f') &&
+                (id_start[3] == 'F' || id_start[3] == 'f') &&
+                (id_start[4] == 'E' || id_start[4] == 'e') &&
+                (id_start[5] == 'R' || id_start[5] == 'r')) {
+                /* Skip whitespace after BUFFER */
+                while (s < line + line_len &&
+                       (*s == ' ' || *s == '\t')) s++;
+                if (s < line + line_len && pp_is_ident_start(*s)) {
+                    const char *buf_start = s;
+                    while (s < line + line_len &&
+                           pp_is_ident_char(*s)) s++;
+                    int buf_len = (int)(s - buf_start);
+                    ns_add_label(tbl, buf_start, buf_len);
+                }
             }        }
     }
 }

@@ -81,7 +81,7 @@ Hello, World!
 
 - **37-instruction MVIS** — a Minimum Viable Instruction Set covering data movement, arithmetic, bitwise logic, control flow, stack operations, byte-granularity memory access, string literals, and system calls
 - **14 architecture-specific opcodes** — non-portable extensions for x86 (CPUID, RDTSC, BSWAP, PUSHA, POPA), 8051 (DJNZ, CJNE, SETB, CLR, RETI), ARM/ARM64 (WFI, DMB), and RISC-V (EBREAK, FENCE) with compile-time compliance enforcement
-- **Standard Libraries** — `@IMPORT std_io` and `@IMPORT std_string` for console I/O and string operations, written entirely in UA
+- **Standard Libraries** — `@IMPORT std_io`, `@IMPORT std_string`, `@IMPORT std_math`, `@IMPORT std_array`, and `@IMPORT std_vector` for console I/O, string operations, math utilities, fixed-size arrays, and dynamic vectors — all written entirely in UA
 - **Precompiler** — `@IF_ARCH`, `@IF_SYS`, `@ENDIF` conditional compilation; `@IMPORT` with once-only file inclusion; `@DUMMY` stub markers
 - **Six backends** — Intel x86-64 (64-bit), Intel x86-32/IA-32 (32-bit), ARM ARMv7-A (32-bit), ARM64/AArch64 (64-bit, Apple Silicon), RISC-V RV64I+M (64-bit), and Intel 8051/MCS-51 (8-bit embedded)
 - **Five output modes** — raw binary, Windows PE executable, Linux ELF executable, macOS Mach-O executable, and JIT execution
@@ -155,7 +155,11 @@ UA/
 │   └── architecture.md         # Internal design and pipeline
 ├── lib/
 │   ├── std_io.ua               # Standard I/O library (print)
-│   └── std_string.ua           # Standard string library (strlen)
+│   ├── std_string.ua           # Standard string library (strlen)
+│   ├── std_math.ua             # Math library (abs, min, max, clamp, pow)
+│   ├── std_array.ua            # Fixed-size byte array (C++ std::array style)
+│   ├── std_arrays.ua           # Legacy array helpers
+│   └── std_vector.ua           # Dynamic byte vector (C++ std::vector style)
 └── src/
     ├── main.c                  # CLI driver, file I/O, JIT executor
     ├── precompiler.h/.c        # Preprocessor (@IF_ARCH, @IMPORT, etc.)
