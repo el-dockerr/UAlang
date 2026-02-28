@@ -783,26 +783,33 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count,
 
     /* --- Win32 runtime stub addresses (computed for pass 2 CALL targets) */
     /* Layout after string data:
-     *   [syscall_dispatcher  6 bytes]  (cmp rax,0; je read)
-     *   [write_dispatcher   84 bytes]
-     *   [read_dispatcher    84 bytes]
-     *   [exit_dispatcher    16 bytes]
-     *   [stdout_handle       8 bytes]
-     *   [stdin_handle        8 bytes]
-     *   [written_var         8 bytes]
-     *   [read_var            8 bytes]
-     *   [IAT: 5 × 8        40 bytes]  (GetStdHandle, WriteFile, ReadFile,
-     *                                   ExitProcess, null)
+     *   [syscall_dispatcher  44 bytes]  (multi-way: 0→read, 1→write,
+     *                                    2→open, 3→close, else→exit)
+     *   [write_dispatcher    98 bytes]  (WriteFile, fd=1→stdout, else handle)
+     *   [read_dispatcher     97 bytes]  (ReadFile,  fd=0→stdin,  else handle)
+     *   [open_dispatcher     93 bytes]  (CreateFileA, mode 0=rd / 1=wr)
+     *   [close_dispatcher    19 bytes]  (CloseHandle)
+     *   [exit_dispatcher     16 bytes]  (ExitProcess)
+     *   [stdout_handle        8 bytes]
+     *   [stdin_handle         8 bytes]
+     *   [written_var          8 bytes]
+     *   [read_var             8 bytes]
+     *   [IAT: 7 × 8         56 bytes]  (GetStdHandle, WriteFile, ReadFile,
+     *                                    ExitProcess, CreateFileA,
+     *                                    CloseHandle, null)
      */
-    #define W32_DISPATCH_SIZE    6   /* syscall dispatcher (cmp+je)     */
-    #define W32_WRITE_STUB_SIZE  84
-    #define W32_READ_STUB_SIZE   84
+    #define W32_DISPATCH_SIZE    44  /* multi-way dispatcher            */
+    #define W32_WRITE_STUB_SIZE  98
+    #define W32_READ_STUB_SIZE   97
+    #define W32_OPEN_STUB_SIZE   93
+    #define W32_CLOSE_STUB_SIZE  19
     #define W32_EXIT_STUB_SIZE   16
     #define W32_DATA_SIZE        32  /* stdout(8)+stdin(8)+written(8)+read(8) */
-    #define W32_IAT_SIZE         40  /* 5 entries × 8 bytes */
+    #define W32_IAT_SIZE         56  /* 7 entries × 8 bytes */
     int stub_base  = str_base + strtab.total_size;  /* start of syscall_dispatcher */
     int exit_base  = stub_base + W32_DISPATCH_SIZE + W32_WRITE_STUB_SIZE
-                   + W32_READ_STUB_SIZE;
+                   + W32_READ_STUB_SIZE + W32_OPEN_STUB_SIZE
+                   + W32_CLOSE_STUB_SIZE;
     int iat_offset = exit_base + W32_EXIT_STUB_SIZE + W32_DATA_SIZE;
     (void)iat_offset;  /* recorded later as code->pe_iat_offset */
 
@@ -1545,98 +1552,207 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count,
          * RIP-relative disp32 = target - instruction_end
          */
 
-        /* ---- syscall_dispatcher (6 bytes) ---- */
-        /* Checks RAX: 0 = read, nonzero = write (fall-through).
-         *   cmp rax, 0    (4 bytes)
-         *   je +84        (2 bytes) -> read_dispatcher at byte 90 */
-        static const uint8_t syscall_dispatcher[6] = {
-            0x48, 0x83, 0xF8, 0x00,              /* cmp rax, 0              */
-            0x74, 0x54                            /* je +84 → read_dispatcher */
+        /* ---- syscall_dispatcher (44 bytes) --------------------------------
+         * Multi-way dispatch on RAX:
+         *   0 → read_dispatcher   (file or stdin read)
+         *   1 → write_dispatcher  (file or stdout write)
+         *   2 → open_dispatcher   (CreateFileA wrapper)
+         *   3 → close_dispatcher  (CloseHandle wrapper)
+         *   else → exit_dispatcher
+         *
+         * Uses 32-bit near jumps (0F 84 / E9) because targets can be >127
+         * bytes away.
+         *
+         * Runtime layout (byte offsets from start of this block):
+         *   Byte   0.. 43:  syscall_dispatcher  (44 bytes)
+         *   Byte  44..141:  write_dispatcher     (98 bytes)
+         *   Byte 142..238:  read_dispatcher      (97 bytes)
+         *   Byte 239..331:  open_dispatcher      (93 bytes)
+         *   Byte 332..350:  close_dispatcher     (19 bytes)
+         *   Byte 351..366:  exit_dispatcher      (16 bytes)
+         *   Byte 367..374:  stdout_handle         (8 bytes)
+         *   Byte 375..382:  stdin_handle          (8 bytes)
+         *   Byte 383..390:  written_var           (8 bytes)
+         *   Byte 391..398:  read_var              (8 bytes)
+         *   Byte 399..406:  IAT[0] GetStdHandle
+         *   Byte 407..414:  IAT[1] WriteFile
+         *   Byte 415..422:  IAT[2] ReadFile
+         *   Byte 423..430:  IAT[3] ExitProcess
+         *   Byte 431..438:  IAT[4] CreateFileA
+         *   Byte 439..446:  IAT[5] CloseHandle
+         *   Byte 447..454:  IAT[6] null terminator
+         */
+        static const uint8_t syscall_dispatcher[44] = {
+            0x48, 0x85, 0xC0,                        /* test rax, rax             */
+            0x0F, 0x84, 0x85, 0x00, 0x00, 0x00,     /* je  read  (disp=133)      */
+            0x48, 0x83, 0xF8, 0x01,                  /* cmp rax, 1                */
+            0x0F, 0x84, 0x19, 0x00, 0x00, 0x00,     /* je  write (disp=25)       */
+            0x48, 0x83, 0xF8, 0x02,                  /* cmp rax, 2                */
+            0x0F, 0x84, 0xD2, 0x00, 0x00, 0x00,     /* je  open  (disp=210)      */
+            0x48, 0x83, 0xF8, 0x03,                  /* cmp rax, 3                */
+            0x0F, 0x84, 0x25, 0x01, 0x00, 0x00,     /* je  close (disp=293)      */
+            0xE9, 0x33, 0x01, 0x00, 0x00             /* jmp exit  (disp=307)      */
         };
-        for (int b = 0; b < 6; b++)
+        for (int b = 0; b < 44; b++)
             emit_byte(code, syscall_dispatcher[b]);
 
-        /* ---- write_dispatcher (84 bytes, starts at runtime byte 6) ---- */
-        /* Translates Linux write-syscall ABI (RSI=buf, RDX=count) to
-         * WriteFile(hStdout, buf, count, &written, NULL) via Win32 ABI.
+        /* ---- write_dispatcher (98 bytes, starts at runtime byte 44) ----
+         * Translates Linux write ABI (RDI=fd, RSI=buf, RDX=count) to
+         * WriteFile(hFile, buf, count, &written, NULL).
+         * If RDI==1 → use cached stdout handle (fetch via GetStdHandle(-11)).
+         * Otherwise  → use RDI directly as a Win32 HANDLE.
+         * Returns bytes written in RAX (from [rbp-8]).
          *
-         * RIP-relative targets for write_dispatcher (abs = byte within runtime):
-         *   stdout_handle  @ 190:  end@6+21=27,  disp=190-27=163 (0xA3)
-         *   IAT[0]         @ 222:  end@6+46=52,  disp=222-52=170 (0xAA)
-         *   stdout_handle  @ 190:  end@6+57=63,  disp=190-63=127 (0x7F)
-         *   IAT[1]         @ 230:  end@6+82=88,  disp=230-88=142 (0x8E) */
-        static const uint8_t write_dispatcher[84] = {
-            /* 0  */ 0x55,                               /* push rbp              */
-            /* 1  */ 0x48, 0x89, 0xE5,                   /* mov rbp, rsp          */
-            /* 4  */ 0x48, 0x83, 0xEC, 0x40,             /* sub rsp, 64           */
-            /* 8  */ 0x49, 0x89, 0xD0,                   /* mov r8, rdx  (count)  */
+         * RIP-relative targets (global offsets):
+         *   stdout_handle @ 367: end@71, disp=296 (0x0128)
+         *   IAT[0]        @ 399: end@96, disp=303 (0x012F)
+         *   stdout_handle @ 367: end@107, disp=260 (0x0104)
+         *   IAT[1]        @ 407: end@137, disp=270 (0x010E) */
+        static const uint8_t write_dispatcher[98] = {
+            /* 0  */ 0x55,
+            /* 1  */ 0x48, 0x89, 0xE5,
+            /* 4  */ 0x48, 0x83, 0xEC, 0x40,
+            /* 8  */ 0x49, 0x89, 0xD0,                   /* mov r8, rdx (count)   */
             /* 11 */ 0x48, 0x89, 0xF2,                   /* mov rdx, rsi (buffer) */
-            /* 14 */ 0x48, 0x8B, 0x0D, 0xA3,0x00,0x00,0x00,  /* mov rcx,[rip+163] → stdout_handle */
-            /* 21 */ 0x48, 0x85, 0xC9,                   /* test rcx, rcx         */
-            /* 24 */ 0x75, 0x25,                         /* jnz +37 → byte 63    */
-            /* --- GetStdHandle(-11) path --- */
-            /* 26 */ 0x41, 0x50,                         /* push r8               */
-            /* 28 */ 0x52,                               /* push rdx              */
-            /* 29 */ 0x48, 0xC7, 0xC1, 0xF5,0xFF,0xFF,0xFF,  /* mov rcx, -11 (STD_OUTPUT) */
-            /* 36 */ 0x48, 0x83, 0xEC, 0x20,             /* sub rsp, 32 (shadow)  */
-            /* 40 */ 0xFF, 0x15, 0xAA,0x00,0x00,0x00,    /* call [rip+170] → IAT[0] GetStdHandle */
-            /* 46 */ 0x48, 0x83, 0xC4, 0x20,             /* add rsp, 32           */
-            /* 50 */ 0x48, 0x89, 0x05, 0x7F,0x00,0x00,0x00,  /* mov [rip+127],rax → stdout_handle */
-            /* 57 */ 0x48, 0x89, 0xC1,                   /* mov rcx, rax          */
-            /* 60 */ 0x5A,                               /* pop rdx               */
-            /* 61 */ 0x41, 0x58,                         /* pop r8                */
-            /* --- have_handle: --- */
-            /* 63 */ 0x4C, 0x8D, 0x4D, 0xF8,            /* lea r9, [rbp-8]       */
-            /* 67 */ 0x48,0xC7,0x44,0x24,0x20, 0x00,0x00,0x00,0x00,  /* mov qword [rsp+32], 0 */
-            /* 76 */ 0xFF, 0x15, 0x8E,0x00,0x00,0x00,    /* call [rip+142] → IAT[1] WriteFile */
-            /* 82 */ 0xC9,                               /* leave                 */
-            /* 83 */ 0xC3                                /* ret                   */
+            /* 14 */ 0x48, 0x83, 0xFF, 0x01,             /* cmp rdi, 1            */
+            /* 18 */ 0x75, 0x33,                         /* jne +51 → use_handle  */
+            /* --- fd==1 (stdout) path --- */
+            /* 20 */ 0x48, 0x8B, 0x0D, 0x28,0x01,0x00,0x00,  /* mov rcx,[rip+296] */
+            /* 27 */ 0x48, 0x85, 0xC9,                   /* test rcx, rcx         */
+            /* 30 */ 0x75, 0x2A,                         /* jnz +42 → do_write    */
+            /* 32 */ 0x41, 0x50,                         /* push r8               */
+            /* 34 */ 0x52,                               /* push rdx              */
+            /* 35 */ 0x48, 0xC7, 0xC1, 0xF5,0xFF,0xFF,0xFF,  /* mov rcx, -11      */
+            /* 42 */ 0x48, 0x83, 0xEC, 0x20,             /* sub rsp, 32           */
+            /* 46 */ 0xFF, 0x15, 0x2F,0x01,0x00,0x00,    /* call [rip+303] → GetStdHandle */
+            /* 52 */ 0x48, 0x83, 0xC4, 0x20,             /* add rsp, 32           */
+            /* 56 */ 0x48, 0x89, 0x05, 0x04,0x01,0x00,0x00,  /* mov [rip+260] → stdout */
+            /* 63 */ 0x48, 0x89, 0xC1,                   /* mov rcx, rax          */
+            /* 66 */ 0x5A,                               /* pop rdx               */
+            /* 67 */ 0x41, 0x58,                         /* pop r8                */
+            /* 69 */ 0xEB, 0x03,                         /* jmp +3 → do_write     */
+            /* --- use_handle (71) --- */
+            /* 71 */ 0x48, 0x89, 0xF9,                   /* mov rcx, rdi          */
+            /* --- do_write (74) --- */
+            /* 74 */ 0x4C, 0x8D, 0x4D, 0xF8,            /* lea r9, [rbp-8]       */
+            /* 78 */ 0x48,0xC7,0x44,0x24,0x20, 0x00,0x00,0x00,0x00,  /* [rsp+32]=0 */
+            /* 87 */ 0xFF, 0x15, 0x0E,0x01,0x00,0x00,    /* call [rip+270] → WriteFile */
+            /* 93 */ 0x8B, 0x45, 0xF8,                   /* mov eax, [rbp-8]      */
+            /* 96 */ 0xC9,                               /* leave                 */
+            /* 97 */ 0xC3                                /* ret                   */
         };
-        for (int b = 0; b < 84; b++)
+        for (int b = 0; b < 98; b++)
             emit_byte(code, write_dispatcher[b]);
 
-        /* ---- read_dispatcher (84 bytes, starts at runtime byte 90) ---- */
-        /* Translates Linux read-syscall ABI (RSI=buf, RDX=count) to
-         * ReadFile(hStdin, buf, count, &read_var, NULL) via Win32 ABI.
+        /* ---- read_dispatcher (97 bytes, starts at runtime byte 142) ----
+         * Translates Linux read ABI (RDI=fd, RSI=buf, RDX=count) to
+         * ReadFile(hFile, buf, count, &read_var, NULL).
+         * If RDI==0 → use cached stdin handle (fetch via GetStdHandle(-10)).
+         * Otherwise  → use RDI directly as a Win32 HANDLE.
+         * Returns bytes read in RAX (from [rbp-8]).
          *
-         * RIP-relative targets for read_dispatcher:
-         *   stdin_handle   @ 198:  end@90+21=111, disp=198-111=87  (0x57)
-         *   IAT[0]         @ 222:  end@90+46=136, disp=222-136=86  (0x56)
-         *   stdin_handle   @ 198:  end@90+57=147, disp=198-147=51  (0x33)
-         *   IAT[2]         @ 238:  end@90+82=172, disp=238-172=66  (0x42) */
-        static const uint8_t read_dispatcher[84] = {
-            /* 0  */ 0x55,                               /* push rbp              */
-            /* 1  */ 0x48, 0x89, 0xE5,                   /* mov rbp, rsp          */
-            /* 4  */ 0x48, 0x83, 0xEC, 0x40,             /* sub rsp, 64           */
-            /* 8  */ 0x49, 0x89, 0xD0,                   /* mov r8, rdx  (count)  */
+         * RIP-relative targets (global offsets):
+         *   stdin_handle @ 375: end@168, disp=207 (0xCF)
+         *   IAT[0]       @ 399: end@193, disp=206 (0xCE)
+         *   stdin_handle @ 375: end@204, disp=171 (0xAB)
+         *   IAT[2]       @ 415: end@234, disp=181 (0xB5) */
+        static const uint8_t read_dispatcher[97] = {
+            /* 0  */ 0x55,
+            /* 1  */ 0x48, 0x89, 0xE5,
+            /* 4  */ 0x48, 0x83, 0xEC, 0x40,
+            /* 8  */ 0x49, 0x89, 0xD0,                   /* mov r8, rdx (count)   */
             /* 11 */ 0x48, 0x89, 0xF2,                   /* mov rdx, rsi (buffer) */
-            /* 14 */ 0x48, 0x8B, 0x0D, 0x57,0x00,0x00,0x00,  /* mov rcx,[rip+87] → stdin_handle */
-            /* 21 */ 0x48, 0x85, 0xC9,                   /* test rcx, rcx         */
-            /* 24 */ 0x75, 0x25,                         /* jnz +37 → byte 63    */
-            /* --- GetStdHandle(-10) path --- */
-            /* 26 */ 0x41, 0x50,                         /* push r8               */
-            /* 28 */ 0x52,                               /* push rdx              */
-            /* 29 */ 0x48, 0xC7, 0xC1, 0xF6,0xFF,0xFF,0xFF,  /* mov rcx, -10 (STD_INPUT) */
-            /* 36 */ 0x48, 0x83, 0xEC, 0x20,             /* sub rsp, 32 (shadow)  */
-            /* 40 */ 0xFF, 0x15, 0x56,0x00,0x00,0x00,    /* call [rip+86] → IAT[0] GetStdHandle */
-            /* 46 */ 0x48, 0x83, 0xC4, 0x20,             /* add rsp, 32           */
-            /* 50 */ 0x48, 0x89, 0x05, 0x33,0x00,0x00,0x00,  /* mov [rip+51],rax → stdin_handle */
-            /* 57 */ 0x48, 0x89, 0xC1,                   /* mov rcx, rax          */
-            /* 60 */ 0x5A,                               /* pop rdx               */
-            /* 61 */ 0x41, 0x58,                         /* pop r8                */
-            /* --- have_handle: --- */
-            /* 63 */ 0x4C, 0x8D, 0x4D, 0xF8,            /* lea r9, [rbp-8]       */
-            /* 67 */ 0x48,0xC7,0x44,0x24,0x20, 0x00,0x00,0x00,0x00,  /* mov qword [rsp+32], 0 */
-            /* 76 */ 0xFF, 0x15, 0x42,0x00,0x00,0x00,    /* call [rip+66] → IAT[2] ReadFile */
-            /* 82 */ 0xC9,                               /* leave                 */
-            /* 83 */ 0xC3                                /* ret                   */
+            /* 14 */ 0x48, 0x85, 0xFF,                   /* test rdi, rdi         */
+            /* 17 */ 0x75, 0x33,                         /* jne +51 → use_handle  */
+            /* --- fd==0 (stdin) path --- */
+            /* 19 */ 0x48, 0x8B, 0x0D, 0xCF,0x00,0x00,0x00,  /* mov rcx,[rip+207] */
+            /* 26 */ 0x48, 0x85, 0xC9,                   /* test rcx, rcx         */
+            /* 29 */ 0x75, 0x2A,                         /* jnz +42 → do_read     */
+            /* 31 */ 0x41, 0x50,                         /* push r8               */
+            /* 33 */ 0x52,                               /* push rdx              */
+            /* 34 */ 0x48, 0xC7, 0xC1, 0xF6,0xFF,0xFF,0xFF,  /* mov rcx, -10      */
+            /* 41 */ 0x48, 0x83, 0xEC, 0x20,             /* sub rsp, 32           */
+            /* 45 */ 0xFF, 0x15, 0xCE,0x00,0x00,0x00,    /* call [rip+206] → GetStdHandle */
+            /* 51 */ 0x48, 0x83, 0xC4, 0x20,             /* add rsp, 32           */
+            /* 55 */ 0x48, 0x89, 0x05, 0xAB,0x00,0x00,0x00,  /* mov [rip+171] → stdin */
+            /* 62 */ 0x48, 0x89, 0xC1,                   /* mov rcx, rax          */
+            /* 65 */ 0x5A,                               /* pop rdx               */
+            /* 66 */ 0x41, 0x58,                         /* pop r8                */
+            /* 68 */ 0xEB, 0x03,                         /* jmp +3 → do_read      */
+            /* --- use_handle (70) --- */
+            /* 70 */ 0x48, 0x89, 0xF9,                   /* mov rcx, rdi          */
+            /* --- do_read (73) --- */
+            /* 73 */ 0x4C, 0x8D, 0x4D, 0xF8,            /* lea r9, [rbp-8]       */
+            /* 77 */ 0x48,0xC7,0x44,0x24,0x20, 0x00,0x00,0x00,0x00,  /* [rsp+32]=0 */
+            /* 86 */ 0xFF, 0x15, 0xB5,0x00,0x00,0x00,    /* call [rip+181] → ReadFile */
+            /* 92 */ 0x8B, 0x45, 0xF8,                   /* mov eax, [rbp-8]      */
+            /* 95 */ 0xC9,                               /* leave                 */
+            /* 96 */ 0xC3                                /* ret                   */
         };
-        for (int b = 0; b < 84; b++)
+        for (int b = 0; b < 97; b++)
             emit_byte(code, read_dispatcher[b]);
 
-        /* exit_dispatcher (16 bytes, starts at runtime byte 174):
+        /* ---- open_dispatcher (93 bytes, starts at runtime byte 239) ----
+         * Translates: RDI=path (null-terminated), RSI=mode (0=read,1=write)
+         * to CreateFileA(path, access, share, NULL, disposition, 0, NULL).
+         * Returns Win32 HANDLE in RAX (INVALID_HANDLE_VALUE = -1 on error).
+         *
+         * RIP-relative target:
+         *   IAT[4] CreateFileA @ 431: end@330, disp=101 (0x65) */
+        static const uint8_t open_dispatcher[93] = {
+            /* 0  */ 0x55,
+            /* 1  */ 0x48, 0x89, 0xE5,
+            /* 4  */ 0x48, 0x83, 0xEC, 0x60,             /* sub rsp, 96           */
+            /* 8  */ 0x48, 0x89, 0xF9,                   /* mov rcx, rdi (path)   */
+            /* 11 */ 0x48, 0x83, 0xFE, 0x01,             /* cmp rsi, 1            */
+            /* 15 */ 0x74, 0x0D,                         /* je write_mode (+13)   */
+            /* --- read mode --- */
+            /* 17 */ 0xBA, 0x00,0x00,0x00,0x80,          /* mov edx, 0x80000000 (GENERIC_READ) */
+            /* 22 */ 0x41, 0xB8, 0x01,0x00,0x00,0x00,    /* mov r8d, 1 (FILE_SHARE_READ) */
+            /* 28 */ 0xEB, 0x08,                         /* jmp setup (+8)        */
+            /* --- write_mode (30) --- */
+            /* 30 */ 0xBA, 0x00,0x00,0x00,0x40,          /* mov edx, 0x40000000 (GENERIC_WRITE) */
+            /* 35 */ 0x45, 0x31, 0xC0,                   /* xor r8d, r8d (share=0)*/
+            /* --- setup (38) --- */
+            /* 38 */ 0x4D, 0x31, 0xC9,                   /* xor r9, r9 (lpSec=NULL) */
+            /* 41 */ 0x48, 0x83, 0xFE, 0x01,             /* cmp rsi, 1            */
+            /* 45 */ 0x74, 0x0B,                         /* je create_always (+11)*/
+            /* --- OPEN_EXISTING = 3 --- */
+            /* 47 */ 0x48, 0xC7, 0x44, 0x24, 0x20, 0x03,0x00,0x00,0x00,
+            /* 56 */ 0xEB, 0x09,                         /* jmp do_create (+9)    */
+            /* --- create_always (58): CREATE_ALWAYS = 2 --- */
+            /* 58 */ 0x48, 0xC7, 0x44, 0x24, 0x20, 0x02,0x00,0x00,0x00,
+            /* --- do_create (67) --- */
+            /* 67 */ 0x48, 0xC7, 0x44, 0x24, 0x28, 0x00,0x00,0x00,0x00, /* flags=0 */
+            /* 76 */ 0x48, 0xC7, 0x44, 0x24, 0x30, 0x00,0x00,0x00,0x00, /* hTmpl=0 */
+            /* 85 */ 0xFF, 0x15, 0x65,0x00,0x00,0x00,    /* call [rip+101] → CreateFileA */
+            /* 91 */ 0xC9,                               /* leave                 */
+            /* 92 */ 0xC3                                /* ret                   */
+        };
+        for (int b = 0; b < 93; b++)
+            emit_byte(code, open_dispatcher[b]);
+
+        /* ---- close_dispatcher (19 bytes, starts at runtime byte 332) ---
+         * Translates: RDI=handle → CloseHandle(handle).
+         * Returns nonzero on success in RAX.
+         *
+         * RIP-relative target:
+         *   IAT[5] CloseHandle @ 439: end@349, disp=90 (0x5A) */
+        static const uint8_t close_dispatcher[19] = {
+            /* 0  */ 0x55,
+            /* 1  */ 0x48, 0x89, 0xE5,
+            /* 4  */ 0x48, 0x83, 0xEC, 0x20,             /* sub rsp, 32 (shadow)  */
+            /* 8  */ 0x48, 0x89, 0xF9,                   /* mov rcx, rdi (handle) */
+            /* 11 */ 0xFF, 0x15, 0x5A,0x00,0x00,0x00,    /* call [rip+90] → CloseHandle */
+            /* 17 */ 0xC9,                               /* leave                 */
+            /* 18 */ 0xC3                                /* ret                   */
+        };
+        for (int b = 0; b < 19; b++)
+            emit_byte(code, close_dispatcher[b]);
+
+        /* exit_dispatcher (16 bytes, starts at runtime byte 351):
          *   Aligns stack, then calls ExitProcess(0) via IAT[3].
-         *   end@174+16=190.  IAT[3] ExitProcess @ 246.  246-190=56 (0x38). */
+         *   end@351+16=367.  IAT[3] ExitProcess @ 423.  423-367=56 (0x38). */
         static const uint8_t exit_dispatcher[16] = {
             0x31, 0xC9,                                  /* xor ecx, ecx (exit 0)   */
             0x48, 0x83, 0xEC, 0x38,                      /* sub rsp, 56             */
@@ -1658,17 +1774,19 @@ CodeBuffer* generate_x86_64(const Instruction *ir, int ir_count,
         /* read_var  (8 bytes, init 0) */
         for (int b = 0; b < 8; b++) emit_byte(code, 0x00);
 
-        /* IAT: 5 entries × 8 bytes (filled by PE emitter on disk,
+        /* IAT: 7 entries × 8 bytes (filled by PE emitter on disk,
          *       patched by Windows loader at runtime) */
         code->pe_iat_offset = code->size;
-        code->pe_iat_count  = 5;   /* GetStdHandle, WriteFile, ReadFile, ExitProcess, null */
-        for (int b = 0; b < 40; b++) emit_byte(code, 0x00);
+        code->pe_iat_count  = 7;   /* GetStdHandle, WriteFile, ReadFile,
+                                      ExitProcess, CreateFileA, CloseHandle, null */
+        for (int b = 0; b < 56; b++) emit_byte(code, 0x00);
 
         fprintf(stderr, "[x86-64] Emitted %d bytes (%d code + %d var + %d buf + %d str"
                 " + %d win32rt)\n",
                 code->size, var_base, vartab.count * X64_VAR_SIZE,
                 buftab.total_size, strtab.total_size,
                 W32_DISPATCH_SIZE + W32_WRITE_STUB_SIZE + W32_READ_STUB_SIZE
+                + W32_OPEN_STUB_SIZE + W32_CLOSE_STUB_SIZE
                 + W32_EXIT_STUB_SIZE + W32_DATA_SIZE + W32_IAT_SIZE);
     } else {
         fprintf(stderr, "[x86-64] Emitted %d bytes (%d code + %d var + %d buf + %d str)\n",

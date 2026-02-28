@@ -27,7 +27,8 @@ Welcome to **Unified Assembly (UA)** — a portable assembly language that lets 
 15. [Using `@DEFINE` — Hardware Constants Without Runtime Cost](#using-define--hardware-constants-without-runtime-cost)
 16. [Working with Arrays (`std_array`)](#working-with-arrays-std_array)
 17. [Working with Vectors (`std_vector`)](#working-with-vectors-std_vector)
-18. [What to Read Next](#what-to-read-next)
+18. [File I/O with `std_iostream`](#file-io-with-std_iostream)
+19. [What to Read Next](#what-to-read-next)
 
 ---
 
@@ -348,7 +349,7 @@ Hello, World!
 
 ## Standard Libraries
 
-UA ships with four standard libraries, all written in UA itself:
+UA ships with several standard libraries, all written in UA itself:
 
 ### std_io — Console Output
 
@@ -406,6 +407,57 @@ UA ships with four standard libraries, all written in UA itself:
     SET  std_arrays.value, 0xFF
     CALL std_arrays.fill_bytes
 ```
+
+### File I/O with `std_iostream`
+
+Read and write files using stream-style operations.  
+Supported on: x86, x86\_32, arm, arm64, riscv (not 8051/MCS-51).
+
+```asm
+@IMPORT std_io
+@IMPORT std_iostream
+
+    BUFFER read_buf, 128
+
+    ; --- Write to a file ---
+    LDS  R0, "output.txt"
+    SET  std_iostream.iostream_path, R0
+    SET  std_iostream.iostream_mode, 1        ; 1 = write (create/truncate)
+    CALL std_iostream.fopen
+
+    LDS  R0, "Hello, file!\n"
+    SET  std_iostream.iostream_buf, R0
+    SET  std_iostream.iostream_count, 13
+    CALL std_iostream.fwrite
+
+    CALL std_iostream.fclose
+
+    ; --- Read it back ---
+    LDS  R0, "output.txt"
+    SET  std_iostream.iostream_path, R0
+    SET  std_iostream.iostream_mode, 0        ; 0 = read
+    CALL std_iostream.fopen
+
+    GET  R0, read_buf
+    SET  std_iostream.iostream_buf, R0
+    SET  std_iostream.iostream_count, 128
+    CALL std_iostream.fread                   ; R0 = bytes read
+
+    GET  R0, read_buf
+    CALL std_io.print                         ; prints "Hello, file!\n"
+
+    CALL std_iostream.fclose
+```
+
+**Shared variables** (set before calling a function):
+
+| Variable | Purpose |
+|---|---|
+| `iostream_path` | Pointer to null-terminated file path string |
+| `iostream_mode` | `0` = read, `1` = write (create/truncate) |
+| `iostream_buf` | Pointer to source or destination buffer |
+| `iostream_count` | Number of bytes to read or write |
+| `iostream_fd` | File descriptor / handle (set by `fopen`) |
 
 ---
 

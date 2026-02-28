@@ -81,7 +81,7 @@ Hello, World!
 
 - **37-instruction MVIS** — a Minimum Viable Instruction Set covering data movement, arithmetic, bitwise logic, control flow, stack operations, byte-granularity memory access, string literals, and system calls
 - **14 architecture-specific opcodes** — non-portable extensions for x86 (CPUID, RDTSC, BSWAP, PUSHA, POPA), 8051 (DJNZ, CJNE, SETB, CLR, RETI), ARM/ARM64 (WFI, DMB), and RISC-V (EBREAK, FENCE) with compile-time compliance enforcement
-- **Standard Libraries** — `@IMPORT std_io`, `@IMPORT std_string`, `@IMPORT std_math`, `@IMPORT std_array`, and `@IMPORT std_vector` for console I/O, string operations, math utilities, fixed-size arrays, and dynamic vectors — all written entirely in UA
+- **[Standard Libraries](docs/standard-libraries.md)** — `std_io` (console I/O), `std_string` (string operations), `std_math` (math utilities), `std_array` (fixed-size arrays), `std_vector` (dynamic vectors), `std_iostream` (file stream I/O) — all written entirely in UA
 - **Precompiler** — `@IF_ARCH`, `@IF_SYS`, `@ENDIF` conditional compilation; `@IMPORT` with once-only file inclusion; `@DUMMY` stub markers
 - **Six backends** — Intel x86-64 (64-bit), Intel x86-32/IA-32 (32-bit), ARM ARMv7-A (32-bit), ARM64/AArch64 (64-bit, Apple Silicon), RISC-V RV64I+M (64-bit), and Intel 8051/MCS-51 (8-bit embedded)
 - **Five output modes** — raw binary, Windows PE executable, Linux ELF executable, macOS Mach-O executable, and JIT execution
@@ -159,7 +159,8 @@ UA/
 │   ├── std_math.ua             # Math library (abs, min, max, clamp, pow)
 │   ├── std_array.ua            # Fixed-size byte array (C++ std::array style)
 │   ├── std_arrays.ua           # Legacy array helpers
-│   └── std_vector.ua           # Dynamic byte vector (C++ std::vector style)
+│   ├── std_vector.ua           # Dynamic byte vector (C++ std::vector style)
+│   └── std_iostream.ua         # File I/O streams (open, read, write, close)
 └── src/
     ├── main.c                  # CLI driver, file I/O, JIT executor
     ├── precompiler.h/.c        # Preprocessor (@IF_ARCH, @IMPORT, etc.)
@@ -180,6 +181,7 @@ UA/
 ## Documentation
 
 - [Beginner's Guide](docs/beginners-guide.md) — getting started tutorial with step-by-step coding examples
+- [Standard Libraries](docs/standard-libraries.md) — complete API reference for all standard libraries (std_io, std_string, std_math, std_arrays, std_array, std_vector, std_iostream)
 - [Language Reference](docs/language-reference.md) — complete instruction set, register model, syntax, and operand rules
 - [MVIS Opcodes Reference](docs/mvis-opcodes.md) — detailed reference for all 37 portable MVIS instructions
 - [Architecture-Specific Opcodes](docs/arch-specific-opcodes.md) — 14 non-portable opcodes for x86, 8051, ARM/ARM64, and RISC-V

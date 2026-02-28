@@ -47,21 +47,27 @@
 /*  0x30  ILT[1]           8 bytes   → HintName WriteFile                  */
 /*  0x38  ILT[2]           8 bytes   → HintName ReadFile                   */
 /*  0x40  ILT[3]           8 bytes   → HintName ExitProcess                */
-/*  0x48  ILT[4]           8 bytes   (null terminator)                     */
-/*  0x50  HN_GetStdHandle 16 bytes   (2 hint + "GetStdHandle\0" + 1 pad)  */
-/*  0x60  HN_WriteFile    12 bytes   (2 hint + "WriteFile\0" + 1 pad)     */
-/*  0x6C  HN_ReadFile     12 bytes   (2 hint + "ReadFile\0" + 2 pad)      */
-/*  0x78  HN_ExitProcess  14 bytes   (2 hint + "ExitProcess\0" + 1 pad)   */
-/*  0x86  DLL name        13 bytes   "kernel32.dll\0"                      */
-/*  Total: 0x93 = 147 bytes                                               */
+/*  0x48  ILT[4]           8 bytes   → HintName CreateFileA                */
+/*  0x50  ILT[5]           8 bytes   → HintName CloseHandle                */
+/*  0x58  ILT[6]           8 bytes   (null terminator)                     */
+/*  0x60  HN_GetStdHandle 16 bytes   (2 hint + "GetStdHandle\0" + 1 pad)  */
+/*  0x70  HN_WriteFile    12 bytes   (2 hint + "WriteFile\0" + 1 pad)     */
+/*  0x7C  HN_ReadFile     12 bytes   (2 hint + "ReadFile\0" + 2 pad)      */
+/*  0x88  HN_ExitProcess  14 bytes   (2 hint + "ExitProcess\0" + 1 pad)   */
+/*  0x96  HN_CreateFileA  14 bytes   (2 hint + "CreateFileA\0" + 1 pad)   */
+/*  0xA4  HN_CloseHandle  14 bytes   (2 hint + "CloseHandle\0" + 1 pad)   */
+/*  0xB2  DLL name        13 bytes   "kernel32.dll\0"                      */
+/*  Total: 0xBF = 191 bytes                                               */
 #define IDATA_IDT_OFF     0x00
 #define IDATA_ILT_OFF     0x28
-#define IDATA_HN0_OFF     0x50   /* GetStdHandle */
-#define IDATA_HN1_OFF     0x60   /* WriteFile    */
-#define IDATA_HN2_OFF     0x6C   /* ReadFile     */
-#define IDATA_HN3_OFF     0x78   /* ExitProcess  */
-#define IDATA_DLL_OFF     0x86   /* DLL name     */
-#define IDATA_RAW_SIZE    0x93   /* 147 bytes    */
+#define IDATA_HN0_OFF     0x60   /* GetStdHandle */
+#define IDATA_HN1_OFF     0x70   /* WriteFile    */
+#define IDATA_HN2_OFF     0x7C   /* ReadFile     */
+#define IDATA_HN3_OFF     0x88   /* ExitProcess  */
+#define IDATA_HN4_OFF     0x96   /* CreateFileA  */
+#define IDATA_HN5_OFF     0xA4   /* CloseHandle  */
+#define IDATA_DLL_OFF     0xB2   /* DLL name     */
+#define IDATA_RAW_SIZE    0xBF   /* 191 bytes    */
 
 /* =========================================================================
  *  Align helper
@@ -297,6 +303,14 @@ int emit_pe_exe(const char *filename, const CodeBuffer *code)
         write_le16(id + IDATA_HN3_OFF, 0);
         memcpy(id + IDATA_HN3_OFF + 2, "ExitProcess", 12);
 
+        /* CreateFileA: hint=0, name="CreateFileA\0" */
+        write_le16(id + IDATA_HN4_OFF, 0);
+        memcpy(id + IDATA_HN4_OFF + 2, "CreateFileA", 12);
+
+        /* CloseHandle: hint=0, name="CloseHandle\0" */
+        write_le16(id + IDATA_HN5_OFF, 0);
+        memcpy(id + IDATA_HN5_OFF + 2, "CloseHandle", 12);
+
         /* DLL name */
         memcpy(id + IDATA_DLL_OFF, "kernel32.dll", 13);
 
@@ -305,7 +319,9 @@ int emit_pe_exe(const char *filename, const CodeBuffer *code)
         write_le64(id + IDATA_ILT_OFF + 8,  (uint64_t)(idata_rva + IDATA_HN1_OFF));
         write_le64(id + IDATA_ILT_OFF + 16, (uint64_t)(idata_rva + IDATA_HN2_OFF));
         write_le64(id + IDATA_ILT_OFF + 24, (uint64_t)(idata_rva + IDATA_HN3_OFF));
-        write_le64(id + IDATA_ILT_OFF + 32, 0);  /* null terminator */
+        write_le64(id + IDATA_ILT_OFF + 32, (uint64_t)(idata_rva + IDATA_HN4_OFF));
+        write_le64(id + IDATA_ILT_OFF + 40, (uint64_t)(idata_rva + IDATA_HN5_OFF));
+        write_le64(id + IDATA_ILT_OFF + 48, 0);  /* null terminator */
 
         /* ---- Import Directory Table (IDT) ----------------------------- */
         uint8_t *idt = id + IDATA_IDT_OFF;
@@ -324,7 +340,9 @@ int emit_pe_exe(const char *filename, const CodeBuffer *code)
         write_le64(iat + 8,  (uint64_t)(idata_rva + IDATA_HN1_OFF));
         write_le64(iat + 16, (uint64_t)(idata_rva + IDATA_HN2_OFF));
         write_le64(iat + 24, (uint64_t)(idata_rva + IDATA_HN3_OFF));
-        write_le64(iat + 32, 0);  /* null terminator */
+        write_le64(iat + 32, (uint64_t)(idata_rva + IDATA_HN4_OFF));
+        write_le64(iat + 40, (uint64_t)(idata_rva + IDATA_HN5_OFF));
+        write_le64(iat + 48, 0);  /* null terminator */
     }
 
     /* ====================================================================
