@@ -1,13 +1,12 @@
 # =============================================================================
 #  UA - Unified Assembler
-#  Release Workflow — Build all platforms, generate checksums, publish release
+#  Release Workflow — Build all platforms, generate checksums, upload to release
 #
-#  Triggered by: git tag push matching  v*.*.*
-#                Example: git tag v1.2.0 && git push origin v1.2.0
+#  Triggered by: Creating/publishing a release in the GitHub UI
+#                OR manually via workflow_dispatch
 #
 #  Release assets produced:
 #    ua-linux-x86_64.tar.gz          Linux  x86-64
-#    ua-macos-intel.tar.gz           macOS  Intel (x86-64)
 #    ua-macos-arm.tar.gz             macOS  Apple Silicon (ARM64)
 #    ua-windows-x86_64.zip           Windows x86-64  (MinGW-w64)
 #    ua-freebsd-x86_64.tar.gz        FreeBSD x86-64
@@ -21,11 +20,8 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
   release:
-    types: [published]        # fired when a release is created/published via the GitHub UI
+    types: [published]
   workflow_dispatch:
     inputs:
       tag:
@@ -33,11 +29,11 @@ on:
         required: true
 
 permissions:
-  contents: write          # Required to create GitHub releases
+  contents: write
 
 jobs:
   # ---------------------------------------------------------------------------
-  #  Matrix job — Linux, macOS Intel, macOS ARM, Windows
+  #  Matrix job — Linux, macOS ARM, Windows
   # ---------------------------------------------------------------------------
   build:
     name: Build · ${{ matrix.name }}
@@ -53,7 +49,7 @@ jobs:
             archive: ua-linux-x86_64.tar.gz
 
           - name:    macos-arm
-            os:      macos-latest          # Apple Silicon (ARM64); Intel runners retired 2026
+            os:      macos-latest
             binary:  ua
             archive: ua-macos-arm.tar.gz
 
@@ -163,7 +159,10 @@ jobs:
             ./ua --version
             printf 'LDI R0, 42\nHLT\n' > /tmp/smoke.ua
             ./ua /tmp/smoke.ua -arch x86 -o /tmp/smoke.bin
-            tar -czf ua-freebsd-x86_64.tar.gz ua lib/
+
+      # Package OUTSIDE the VM so the artifact path is reliable
+      - name: Package FreeBSD archive
+        run: tar -czf ua-freebsd-x86_64.tar.gz ua lib/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -173,92 +172,61 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  #  Release job — collect all artifacts, generate checksums, publish
+  #  Release job — collect all artifacts, generate checksums, upload to release
   #
-  #  Runs on Ubuntu (sha256sum is available by default).
-  #  Requires the `contents: write` permission declared at the top of the file.
+  #  When triggered by `release: published`, assets are uploaded to the
+  #  EXISTING release.  The release body written in the GitHub UI is preserved.
+  #  When triggered by `workflow_dispatch`, a new release is created.
   # ---------------------------------------------------------------------------
-  release:
-    name: Publish Release
+  upload-assets:
+    name: Upload Release Assets
     needs: [build, build-freebsd]
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout (for release notes)
-        uses: actions/checkout@v4
-
-      # ---- Download every platform artifact into a staging directory -----
+      # ---- Download every platform artifact into staging -----------------
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-staging/
 
-      # ---- Flatten: each artifact lands in its own sub-directory --------
-      #  release-staging/
-      #    linux-x86_64/ua-linux-x86_64.tar.gz
-      #    windows-x86_64/ua-windows-x86_64.zip
-      #    ...
-      - name: Flatten artifacts into working directory
+      # ---- Flatten into dist/ --------------------------------------------
+      - name: Flatten artifacts
         run: |
           mkdir -p dist/
           find release-staging/ -type f \( -name "*.tar.gz" -o -name "*.zip" \) \
                -exec mv {} dist/ \;
+          echo "--- Release assets ---"
           ls -lh dist/
 
       # ---- Generate SHA-256 checksums ------------------------------------
       - name: Generate SHA-256 checksums
         working-directory: dist/
         run: |
-          sha256sum *.tar.gz *.zip > checksums.sha256
+          sha256sum * > checksums.sha256
           echo "--- Checksums ---"
           cat checksums.sha256
 
-      # ---- Extract tag name for display in release title ----------------
-      - name: Set release version
+      # ---- Determine tag name --------------------------------------------
+      - name: Set release tag
         id: version
         run: |
           if [ "${{ github.event_name }}" = "release" ]; then
             echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
           else
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
           fi
 
-      # ---- Build release notes from CHANGELOG if present, else auto -----
-      - name: Build release body
-        id: release_body
-        run: |
-          VERSION="${{ steps.version.outputs.tag }}"
-          cat > release_body.md <<EOF
-          ## UA — Unified Assembler ${VERSION}
-
-          ### Downloads
-
-          | Platform | Archive |
-          |----------|---------|
-          | Linux x86-64 | \`ua-linux-x86_64.tar.gz\` |
-          | macOS Apple Silicon (ARM64) | \`ua-macos-arm.tar.gz\` |
-          | Windows x86-64 | \`ua-windows-x86_64.zip\` |
-          | FreeBSD x86-64 | \`ua-freebsd-x86_64.tar.gz\` |
-
-          Each archive contains the \`ua\` binary and the \`lib/\` standard library directory.
-
-          ### Verify integrity
-          Download \`checksums.sha256\` and run:
-          \`\`\`
-          sha256sum --check checksums.sha256
-          \`\`\`
-          EOF
-
-      # ---- Create the GitHub release and upload all assets ---------------
-      - name: Create GitHub Release
+      # ---- Upload assets to the release ----------------------------------
+      #  - On `release: published`: attaches files to the existing release
+      #    without overwriting the release body or notes.
+      #  - On `workflow_dispatch`: creates a new release for the given tag.
+      - name: Upload assets to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name:   ${{ steps.version.outputs.tag }}
-          name:       "UA Unified Assembler ${{ steps.version.outputs.tag }}"
-          body_path:  release_body.md
-          draft:      false
+          tag_name: ${{ steps.version.outputs.tag }}
+          name:     "UA Unified Assembler ${{ steps.version.outputs.tag }}"
+          draft:    false
           prerelease: ${{ contains(steps.version.outputs.tag, '-') }}
           files: |
             dist/ua-linux-x86_64.tar.gz

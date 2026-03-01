@@ -45,7 +45,7 @@
 #include "emitter_macho.h"
 #include "precompiler.h"
 
-#define UA_VERSION "26.0.1-ALPHA"
+#define UA_VERSION "26.0.2-ALPHA"
 
 /* Forward declaration — used by compliance tables before full definition */
 static int str_casecmp_portable(const char *a, const char *b);
