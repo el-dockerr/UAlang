@@ -73,22 +73,22 @@
 **Objective:** Establish the fundamental building blocks required by any compiler.
 
 #### Task 1.1: Dynamic Memory Allocator (`std_malloc`)
-- [ ] Implement `malloc(size)` — Allocate N bytes from heap
+- [x] Implement `malloc(size)` — Allocate N bytes from heap
   - Use `mmap` (Linux/macOS, syscall 9 on x86-64) or `VirtualAlloc` (Win32)
   - Initial implementation: simple bump allocator with fixed heap size (e.g., 16 MB)
   - Return pointer in R0, or 0 on failure
-- [ ] Implement `free(ptr)` — Release allocated memory
+- [x] Implement `free(ptr)` — Release allocated memory
   - Initial implementation: no-op (defer real free-list management to v28)
   - Track allocated regions for validation
-- [ ] Implement `realloc(ptr, new_size)` — Resize allocation
+- [x] Implement `realloc(ptr, new_size)` — Resize allocation
   - Allocate new block, copy data, free old (simple strategy)
-- [ ] Implement `calloc(count, size)` — Zero-initialized allocation
+- [x] Implement `calloc(count, size)` — Zero-initialized allocation
   - `malloc` + zero-fill loop
-- [ ] Write test suite in UA:
+- [x] Write test suite in UA:
   - Allocate 1 KB, 10 KB, 1 MB blocks
   - Realloc stress test (grow from 64 bytes to 1 MB in steps)
   - Validate pointer alignment (8-byte alignment on 64-bit architectures)
-- [ ] Document memory model and heap layout
+- [x] Document memory model and heap layout
 
 **Dependencies:** Core MVIS opcodes (`LDI`, `MOV`, `ADD`, `SUB`, `CMP`, `JZ`, `STORE`, `LOAD`, `SYS`)  
 **Estimated Complexity:** Medium (200-300 lines UA)  
